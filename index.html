@@ -103,27 +103,10 @@
   </div>
 
 <script>
-/* ========== CONFIG ========== */
-/* KEEP TB_JWT if you still push to ThingsBoard elsewhere; reads now come from ThingSpeak */
-const CONFIG = {
-  TB_HOST: "https://demo.thingsboard.io",
-  TB_DEVICE_ID: "e55ec190-87b8-11f0-a9b5-792e2194a5d4",
-  TB_JWT: "Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJkZWJhcnBpdGFfcGhkMjJAaWlpdGthbHlhbmkuYWMu"
-          + "aW4iLCJ1c2VySWQiOiJlOTFkM2MxMC03Njk0LTExZjAtOTFjYi1mNWM2NTRkNTVkMDMiLCJzY29wZXMi"
-          + "OlsiVEVOQU5UX0FETUlOIl0sInNlc3Npb25JZCI6Ijg5MmQ5MjBlLTY4MzItNGUyNy04ZTY2LWIzYmZh"
-          + "Yjk2ZmQ5YSIsImV4cCI6MTc1ODY4MzcxNSwiaXNzIjoidGhpbmdzYm9hcmQuaW8iLCJpYXQiOjE3NTY4"
-          + "ODM3MTUsImZpcnN0TmFtZSI6IkRlYmFycGl0YSBQYXVsIiwibGFzdE5hbWUiOiJDaG91ZGh1cnkiLCJl"
-          + "bmFibGVkIjp0cnVlLCJwcml2YWN5UG9saWN5QWNjZXB0ZWQiOnRydWUsImlzUHVibGljIjpmYWxzZSwi"
-          + "dGVuYW50SWQiOiJlOGZlYjc5MC03Njk0LTExZjAtOTFjYi1mNWM2NTRkNTVkMDMiLCJjdXN0b21lcklk"
-          + "IjoiMTM4MTQwMDAtMWRkMi0xMWIyLTgwODAtODA4MDgwODA4MDgwIn0._AvSn7GoL1c-XVZlocJgTfD734"
-          + "HRPBcEnBwMR88TevuNnubQRO3tJc6UDmpgl_bHjICj-d0tZMCy2TVJjIPapQ"
-};
-
-/* KEYS used inside the app */
+/* ========== KEYS & ThingSpeak config ========== */
 const KEYS = ["temperature", "rainrate", "humidity", "soil_moisture"];
 
 /* ThingSpeak configuration (READ keys used for reads) */
-/* NOTE: keep read keys secret in production; for local dev this is fine */
 const THINGSPEAK = {
   ACTUAL_CHANNEL_ID: 3007544,
   ACTUAL_READ_KEY:   "M5Y79EDJWV6KETHL",   // read key for actual channel
@@ -135,7 +118,7 @@ const THINGSPEAK = {
 const TS_FIELDS_ACTUAL = {
   temperature: "field1",
   humidity:    "field2",
-  rainrate:    "field3",  // rain rate
+  rainrate:    "field3",
   soil_moisture: "field4"
 };
 const TS_FIELDS_PRED = {
@@ -143,14 +126,6 @@ const TS_FIELDS_PRED = {
   humidity:    "field2",
   rainrate:    "field3",
   soil_moisture: "field4"
-};
-
-/* Add mapping for ThingsBoard prediction keys (kept for compatibility in earlier code) */
-const PRED_KEYS = {
-  temperature: "temperature_predicted",
-  rainrate:    "rainrate_predicted",
-  humidity:    "humidity_predicted",
-  soil_moisture: "soil_moisture_predicted"
 };
 
 /* ========== i18n ========== */
@@ -166,7 +141,7 @@ const STR = {
     imgTitle:"Rice Leaf Disease Detection",
     imgDesc:"Upload or capture an image. A TF.js model must be in model_for_github/model/leaf_tfjs/"
   },
-  hi: { title:"कृषिबंधु — स्मार्ट फ़ार्मिंग डैशबोर्ड", samplesLabel:"नमूने:", statusIdle:"स्थिति: निष्क्रिय", statusLoading:"स्थिति: लोड हो रही...", predictionLoading:"मॉडल लोड हो रहा है...", recommendTitle:"सुझाव", note:"पढ़ाई ThingSpeak से होती है। यदि CORS अवरुद्ध हो, प्रॉक्सी का उपयोग करें।", imgTitle:"धान पत्ता रोग पहचान", imgDesc:"इमेज अपलोड करें या कैप्चर करें। TF.js मॉडल model_for_github/model/leaf_tfjs/ में रखें।" },
+  hi: { title:"कृषिबंधु — स्मार्ट फ़ार्मिंग डैशबोर्ड", samplesLabel:"नमूने:", statusIdle:"स्थिति: निष्क्रिय", statusLoading:"स्थिति: लोड हो रही...", predictionLoading:"मॉडल लोड हो रहा है...", recommendTitle:"सुझाव", note:"पठित डाटा ThingSpeak থেকে আসে। यदि CORS अवरुद्ध हो, प्रॉक्सी का उपयोग करें।", imgTitle:"धान पत्ता रोग पहचान", imgDesc:"इमेज अपलोड करें या कैप्चर करें। TF.js मॉडल model_for_github/model/leaf_tfjs/ में रखें।" },
   bn: { title:"Krishibandhu — স্মার্ট ফার্মিং ড্যাশবোর্ড", samplesLabel:"নমুনা:", statusIdle:"স্ট্যাটাস: নিষ্ক্রিয়", statusLoading:"স্ট্যাটাস: লোড হচ্ছে...", predictionLoading:"মডেল লোড হচ্ছে...", recommendTitle:"প্রস্তাবনা", note:"পঠিত ডেটা ThingSpeak থেকে আসে। যদি CORS ব্লক করে, প্রোক্সি ব্যবহার করুন।", imgTitle:"ধান পাতা রোগ সনাক্তকরণ", imgDesc:"ছবি আপলোড বা ক্যাপচার করুন। TF.js মডেল model_for_github/model/leaf_tfjs/ এ রাখুন।" }
 };
 
@@ -298,7 +273,7 @@ async function fetchTelemetryFromThingSpeak(limit=100) {
     for (const k of KEYS) out[k] = [];
     for (const f of feeds) {
       // ThingSpeak created_at is like "2025-11-16T12:34:56Z"
-      const ts = f.created_at ? (new Date(f.created_at)).getTime() : (f.entry_id ? Date.now() : Date.now());
+      const ts = f.created_at ? (new Date(f.created_at)).getTime() : Date.now();
       // map fields
       for (const k of KEYS) {
         const field = TS_FIELDS_ACTUAL[k];
@@ -419,7 +394,7 @@ async function computePredictedSeries(normData) {
   return { predictedByKey, combinedLabels, horizon };
 }
 
-/* ---------- Main refresh + plotting (modified to use ThingSpeak) ---------- */
+/* ---------- Main refresh + plotting (uses ThingSpeak only) ---------- */
 async function refreshAll_andPlot() {
   const limit = Number(sampleSelect.value);
 
