@@ -7,7 +7,7 @@
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- TensorFlow.js (for disease model) -->
+  <!-- TensorFlow.js (for disease model & numeric models) -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
 
   <style>
@@ -26,6 +26,7 @@
     .small{font-size:13px;color:#98a8b9}
     .uploader{display:flex;gap:8px;align-items:center}
     .recommend{margin-top:10px;background:#071826;padding:10px;border-radius:8px}
+    #status{font-weight:600}
   </style>
 </head>
 <body>
@@ -59,9 +60,7 @@
 
         <hr style="opacity:.08"/>
 
-        <div class="latest" id="latestValues" aria-live="polite">
-          <!-- latest values will appear here -->
-        </div>
+        <div class="latest" id="latestValues" aria-live="polite"></div>
 
         <hr style="opacity:.08"/>
 
@@ -74,7 +73,7 @@
 
       <div class="card" style="flex:1;min-width:320px">
         <h3 id="imgTitle">Rice Leaf Disease Detection</h3>
-        <div class="small" id="imgDesc">Upload or capture an image. A pretrained TF.js model (model.json) must be in /model/</div>
+        <div class="small" id="imgDesc">Upload or capture an image. A pretrained TF.js model (model.json) must be in /model_for_github/model/leaf_tfjs/</div>
 
         <div class="uploader" style="margin-top:10px">
           <input id="imgInput" accept="image/*" type="file" />
@@ -104,20 +103,23 @@
   </div>
 
 <script>
-/* =====================
-   CONFIG — update if needed
-   ===================== */
+/* ========== CONFIG ========== */
+/* Replace the token in CONFIG.TB_JWT in your local copy (do not push tokens publicly) */
 const CONFIG = {
   TB_HOST: "https://demo.thingsboard.io",
   TB_DEVICE_ID: "e55ec190-87b8-11f0-a9b5-792e2194a5d4",
-  TB_JWT: "Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJkZWJhcnBpdGFfcGhkMjJAaWlpdGthbHlhbmkuYWMu..."
-  // shorten for display; replace full token here
+  TB_JWT: "Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJkZWJhcnBpdGFfcGhkMjJAaWlpdGthbHlhbmkuYWMu"
+          "aW4iLCJ1c2VySWQiOiJlOTFkM2MxMC03Njk0LTExZjAtOTFjYi1mNWM2NTRkNTVkMDMiLCJzY29wZXMi"
+          "OlsiVEVOQU5UX0FETUlOIl0sInNlc3Npb25JZCI6Ijg5MmQ5MjBlLTY4MzItNGUyNy04ZTY2LWIzYmZh"
+          "Yjk2ZmQ5YSIsImV4cCI6MTc1ODY4MzcxNSwiaXNzIjoidGhpbmdzYm9hcmQuaW8iLCJpYXQiOjE3NTY4"
+          "ODM3MTUsImZpcnN0TmFtZSI6IkRlYmFycGl0YSBQYXVsIiwibGFzdE5hbWUiOiJDaG91ZGh1cnkiLCJl"
+          "bmFibGVkIjp0cnVlLCJwcml2YWN5UG9saWN5QWNjZXB0ZWQiOnRydWUsImlzUHVibGljIjpmYWxzZSwi"
+          "dGVuYW50SWQiOiJlOGZlYjc5MC03Njk0LTExZjAtOTFjYi1mNWM2NTRkNTVkMDMiLCJjdXN0b21lcklk"
+          "IjoiMTM4MTQwMDAtMWRkMi0xMWIyLTgwODAtODA4MDgwODA4MDgwIn0._AvSn7GoL1c-XVZlocJgTfD734"
+          "HRPBcEnBwMR88TevuNnubQRO3tJc6UDmpgl_bHjICj-d0tZMCy2TVJjIPapQ"
 };
-
 const KEYS = ["temperature", "rainrate", "humidity", "soil_moisture"];
-/* ===================== */
-
-/* i18n strings */
+/* ========== i18n ========== */
 const STR = {
   en: {
     title: "Krishibandhu — Smart Farming Dashboard",
@@ -128,33 +130,13 @@ const STR = {
     recommendTitle:"Recommendations",
     note: "If ThingsBoard blocks CORS, configure a small proxy or host the site where requests allowed.",
     imgTitle:"Rice Leaf Disease Detection",
-    imgDesc:"Upload or capture an image. A pretrained TF.js model must be in /model/",
+    imgDesc:"Upload or capture an image. A TF.js model must be in model_for_github/model/leaf_tfjs/"
   },
-  hi: {
-    title: "কৃষিবন্ধু — स्मार्ट फ़ार्मिंग डैशबोर्ड",
-    samplesLabel:"नमूने:",
-    statusIdle:"स्थिति: निष्क्रिय",
-    statusLoading:"स्थिति: लोड हो रही...",
-    predictionLoading:"मॉडल लोड हो रहा है...",
-    recommendTitle:"सुझाव",
-    note:"यदि ThingsBoard CORS अवरुद्ध करता है, तो एक छोटा प्रॉक्सी कॉन्फ़िगर करें।",
-    imgTitle:"धान पत्ता रोग पहचान",
-    imgDesc:"इमेज अपलोड करें या कैप्चर करें। TF.js मॉडल /model/ में रखें।"
-  },
-  bn: {
-    title: "Krishibandhu — স্মার্ট ফার্মিং ড্যাশবোর্ড",
-    samplesLabel:"নমুনা:",
-    statusIdle:"স্ট্যাটাস: নিষ্ক্রিয়",
-    statusLoading:"স্ট্যাটাস: লোড হচ্ছে...",
-    predictionLoading:"মডেল লোড হচ্ছে...",
-    recommendTitle:"প্রস্তাবনা",
-    note:"যদি ThingsBoard CORS ব্লক করে, একটি প্রোক্সি ব্যবহার করুন।",
-    imgTitle:"ধান পাতা রোগ সনাক্তকরণ",
-    imgDesc:"ছবি আপলোড বা ক্যাপচার করুন। TF.js মডেল /model/ এ রাখুন।"
-  }
+  hi: { title:"कृषिबंधु — स्मार्ट फ़ार्मिंग डैशबोर्ड", samplesLabel:"नमूने:", statusIdle:"स्थिति: निष्क्रिय", statusLoading:"स्थिति: लोड हो रही...", predictionLoading:"मॉडल लोड हो रहा है...", recommendTitle:"सुझाव", note:"यदि ThingsBoard CORS अवरुद्ध करता है, तो एक छोटा प्रॉक्सी कॉन्फ़िगर करें।", imgTitle:"धान पत्ता रोग पहचान", imgDesc:"इमेज अपलोड करें या कैप्चर करें। TF.js मॉडल model_for_github/model/leaf_tfjs/ में रखें।" },
+  bn: { title:"Krishibandhu — স্মার্ট ফার্মিং ড্যাশবোর্ড", samplesLabel:"নমুনা:", statusIdle:"স্ট্যাটাস: নিষ্ক্রিয়", statusLoading:"স্ট্যাটাস: লোড হচ্ছে...", predictionLoading:"মডেল লোড হচ্ছে...", recommendTitle:"প্রস্তাবনা", note:"যদি ThingsBoard CORS ব্লক করে, একটি প্রোক্সি ব্যবহার করুন।", imgTitle:"ধান পাতা রোগ সনাক্তকরণ", imgDesc:"ছবি আপলোড বা ক্যাপচার করুন। TF.js মডেল model_for_github/model/leaf_tfjs/ এ রাখুন।" }
 };
 
-/* DOM */
+/* ========== DOM elements ========== */
 const statusEl = document.getElementById('status');
 const latestEl = document.getElementById('latestValues');
 const sampleSelect = document.getElementById('sampleSelect');
@@ -177,7 +159,6 @@ const recommendTitle = document.getElementById('recommendTitle');
 
 /* Charts */
 let chartTemp, chartRain, chartHum, chartSoil;
-
 function makeChart(ctx, label) {
   return new Chart(ctx, {
     type: 'line',
@@ -194,35 +175,89 @@ window.addEventListener('load', () => {
   chartRain = makeChart(document.getElementById('chartRain').getContext('2d'), 'Rain Rate (mm/hr)');
   chartHum  = makeChart(document.getElementById('chartHum').getContext('2d'), 'Humidity (%)');
   chartSoil = makeChart(document.getElementById('chartSoil').getContext('2d'), 'Soil Moisture');
-
+  applyLang('en');
   refreshAll();
+  // attempt to pre-load models (non-blocking)
+  loadAllModels();
 });
 
-/* ThingsBoard timeseries API:
-   GET /api/plugins/telemetry/DEVICE/{deviceId}/values/timeseries?keys=temperature,humidity
-   Use Authorization: Bearer <token>
-*/
+/* ========== Model candidate paths (match your repo layout) ========== */
+const MODEL_PATHS = {
+  leaf: [
+    "./model_for_github/model/leaf_tfjs/model.json",
+    "/model_for_github/model/leaf_tfjs/model.json"
+  ],
+  temperature: [
+    "./model_for_github/temperature/model.json",
+    "./model_for_github/temperature/group1-shard1of1.bin" // presence check, fallback
+  ],
+  humidity: [
+    "./model_for_github/humidity/model.json"
+  ],
+  rain: [
+    "./model_for_github/rainMmHr/model.json"
+  ],
+  soil: [
+    "./model_for_github/soilMoisture/model.json"
+  ]
+};
+
+/* loaded models map */
+const MODELS = { leaf: null, temperature: null, humidity: null, rain: null, soil: null };
+
+/* helper: set status text */
+function setStatus(txt) { statusEl.textContent = txt; }
+
+/* try to load TFJS layers model from a list of candidate URLs */
+async function tryLoadFromCandidates(candidates, friendlyName) {
+  for (const url of candidates) {
+    try {
+      setStatus(`Trying ${friendlyName} model: ${url}`);
+      const m = await tf.loadLayersModel(url);
+      setStatus(`${friendlyName} model loaded`);
+      console.log(`Loaded ${friendlyName} model from`, url);
+      return m;
+    } catch (e) {
+      console.warn(`Failed to load ${friendlyName} from ${url}:`, e);
+    }
+  }
+  setStatus(`${friendlyName} model not found in candidates`);
+  return null;
+}
+
+/* load all models (non-blocking) */
+async function loadAllModels() {
+  // leaf (image classifier)
+  MODELS.leaf = await tryLoadFromCandidates(MODEL_PATHS.leaf, "Leaf");
+  // numeric models (optional — if not present, UI falls back to simple linear predictor)
+  MODELS.temperature = await tryLoadFromCandidates(MODEL_PATHS.temperature, "Temperature");
+  MODELS.humidity = await tryLoadFromCandidates(MODEL_PATHS.humidity, "Humidity");
+  MODELS.rain = await tryLoadFromCandidates(MODEL_PATHS.rain, "Rain");
+  MODELS.soil = await tryLoadFromCandidates(MODEL_PATHS.soil, "Soil");
+  const loaded = Object.entries(MODELS).filter(([,v])=>v).map(([k])=>k);
+  setStatus(loaded.length ? `Models loaded: ${loaded.join(", ")}` : "No TFJS models loaded (using fallback predictors).");
+}
+
+/* ========== ThingsBoard fetch & local prediction ========== */
 async function fetchTelemetry(limit=100) {
-  setStatus(STR[currentLang()].statusLoading);
+  setStatus(STR[langSelect.value].statusLoading || "Loading...");
   try {
     const keys = KEYS.join(',');
-    // ThingsBoard timeseries endpoint (returns arrays of {ts, value} for each key)
     const url = `${CONFIG.TB_HOST}/api/plugins/telemetry/DEVICE/${CONFIG.TB_DEVICE_ID}/values/timeseries?keys=${encodeURIComponent(keys)}&limit=${limit}`;
     const res = await fetch(url, { headers: { "Authorization": CONFIG.TB_JWT }});
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json(); // object with arrays for each key
-    setStatus(`${STR[currentLang()].statusIdle}`);
+    const data = await res.json();
+    setStatus(STR[langSelect.value].statusIdle || "Idle");
     return data;
   } catch (e) {
     console.error('fetchTelemetry error', e);
-    setStatus('Failed to load — check CORS or token');
+    setStatus('Failed to load — check CORS / token');
     return null;
   }
 }
 
-/* Convert timeseries object to sorted array by timestamp of "records" with all keys combined */
+/* normalize timeseries to records sorted by timestamp */
 function normalizeData(tsObj) {
-  // tsObj: {temperature: [{ts:..., value:...}, ...], humidity: [...] }
   const map = new Map();
   for (const k of KEYS) {
     const arr = tsObj[k] || [];
@@ -232,34 +267,27 @@ function normalizeData(tsObj) {
       map.get(t)[k] = Number(item.value);
     }
   }
-  // to array sorted by ts
   const arr = Array.from(map.values()).sort((a,b)=>a.ts-b.ts);
-  // convert ts to ISO
   return arr.map(r=> ({...r, time: new Date(r.ts).toLocaleString()}));
 }
 
-/* Simple predictor: linear regression on last N points for each key, returns next timestamp predictions */
+/* simple linear predictor (fallback) */
 function predictNextSeries(data, steps=1) {
-  // data: array of records sorted ascending by ts with keys
   const preds = [];
   const lastTs = data.length ? new Date(data[data.length-1].ts) : new Date();
-  const intervalMs = data.length > 1 ? (data[data.length-1].ts - data[data.length-2].ts) : 15*60*1000;
-  for (let s=1;s<=steps;s++) {
+  const intervalMs = data.length>1 ? (data[data.length-1].ts - data[data.length-2].ts) : 15*60*1000;
+  for (let s=1;s<=steps;s++){
     const predTs = lastTs.getTime() + s*intervalMs;
     const rec = { ts: predTs, time: new Date(predTs).toLocaleString() };
     for (const key of KEYS) {
-      // collect last up to 6 values for simple linear regression
-      const y = [];
-      const x = [];
-      let kCount=0;
-      for (let i=Math.max(0, data.length-6); i<data.length; i++) {
-        if (data[i][key] === undefined) continue;
-        x.push(kCount+1); y.push(data[i][key]); kCount++;
-      }
-      if (y.length < 2) {
-        rec[key] = (data.length && data[data.length-1][key] !== undefined) ? data[data.length-1][key] : 0;
+      // use last value if insufficient history
+      const available = data.filter(d => d[key] !== undefined).slice(-6);
+      if (available.length < 2) {
+        rec[key] = available.length ? available[available.length-1][key] : 0;
       } else {
-        // compute slope, intercept
+        // x = 1..n
+        const x = available.map((_,i)=>i+1);
+        const y = available.map(d=>d[key]);
         const n = x.length;
         const sumX = x.reduce((a,b)=>a+b,0);
         const sumY = y.reduce((a,b)=>a+b,0);
@@ -268,20 +296,18 @@ function predictNextSeries(data, steps=1) {
         const denom = n*sumX2 - sumX*sumX;
         const slope = denom === 0 ? 0 : (n*sumXY - sumX*sumY)/denom;
         const intercept = (sumY - slope*sumX)/n;
-        const nextX = x.length + 1;
+        const nextX = n+1;
         rec[key] = intercept + slope*nextX;
       }
     }
     preds.push(rec);
-    // for multi-step, append predicted to data to allow autoregressive continuation
     data.push({...rec});
   }
   return preds;
 }
 
-/* Render everything on page */
+/* render data & predictions to UI and charts */
 function renderAll(normData, preds) {
-  // latest
   latestEl.innerHTML = '';
   const last = normData.length ? normData[normData.length-1] : null;
   for (const key of KEYS) {
@@ -290,7 +316,8 @@ function renderAll(normData, preds) {
     div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
     latestEl.appendChild(div);
   }
-  // recommendations (simple thresholds)
+
+  // simple recommendation rules
   const rc = [];
   const t = last ? last.temperature : null;
   if (t !== null && t !== undefined) {
@@ -306,7 +333,7 @@ function renderAll(normData, preds) {
     if (hum > 80) rc.push("High humidity: risk of fungal disease. Check leaves.");
   }
   recommendEl.innerHTML = rc.length ? rc.map(x=>`• ${x}`).join("<br>") : "No specific recommendations.";
-  // update charts
+
   const labels = normData.map(r=> r.time);
   function setChart(ch, key) {
     ch.data.labels = labels;
@@ -322,7 +349,6 @@ function renderAll(normData, preds) {
 
 /* CSV download */
 function generateCSV(data, preds) {
-  // produce combined CSV with time, actual_x, predicted_x ...
   const rows = [];
   const headers = ["time"];
   for (const k of KEYS) {
@@ -330,9 +356,7 @@ function generateCSV(data, preds) {
     headers.push(`${k}_predicted`);
   }
   rows.push(headers.join(','));
-  // create a map of predictions by ts for quick lookup
   const predMap = new Map((preds||[]).map(p=>[p.ts, p]));
-  // assemble union of times (actual times + predicted)
   const allTimes = new Set([...(data||[]).map(d=>d.ts), ...(preds||[]).map(p=>p.ts)]);
   const timesSorted = Array.from(allTimes).sort((a,b)=>a-b);
   for (const t of timesSorted) {
@@ -349,118 +373,131 @@ function generateCSV(data, preds) {
   return rows.join('\n');
 }
 
-/* top-level */
+/* top-level refresh flow */
 async function refreshAll() {
   const limit = Number(sampleSelect.value);
   const raw = await fetchTelemetry(limit);
   if (!raw) return;
   const norm = normalizeData(raw);
-  // copy norm for predictor
   const copyForPred = norm.map(x=> ({...x}));
-  const preds = predictNextSeries(copyForPred, 96); // predict next 96 steps (e.g., 24h if 15-min)
+  let preds = predictNextSeries(copyForPred, 96); // fallback predictor
+  // If TFJS numeric models are loaded, attempt to use them for the last record -> next prediction
+  try {
+    const last = norm.slice(-1)[0];
+    if (last) {
+      // prepare inputs for each model if available
+      if (MODELS.temperature) {
+        // Example: if model expects single value [temperature], adjust as necessary
+        const inTensor = tf.tensor2d([[ last.temperature || 0 ]]);
+        const out = MODELS.temperature.predict(inTensor);
+        const val = (await out.data())[0];
+        preds[0].temperature = val;
+        inTensor.dispose(); if (out.dispose) out.dispose();
+      }
+      if (MODELS.humidity) {
+        const inTensor = tf.tensor2d([[ last.humidity || 0 ]]);
+        const out = MODELS.humidity.predict(inTensor);
+        const val = (await out.data())[0];
+        preds[0].humidity = val;
+        inTensor.dispose(); if (out.dispose) out.dispose();
+      }
+      if (MODELS.rain) {
+        const inTensor = tf.tensor2d([[ last.rainrate || 0 ]]);
+        const out = MODELS.rain.predict(inTensor);
+        const val = (await out.data())[0];
+        preds[0].rainrate = val;
+        inTensor.dispose(); if (out.dispose) out.dispose();
+      }
+      if (MODELS.soil) {
+        const inTensor = tf.tensor2d([[ last.soil_moisture || 0 ]]);
+        const out = MODELS.soil.predict(inTensor);
+        const val = (await out.data())[0];
+        preds[0].soil_moisture = val;
+        inTensor.dispose(); if (out.dispose) out.dispose();
+      }
+    }
+  } catch (e) {
+    console.warn("TFJS numeric model prediction failed, using fallback preds", e);
+  }
+
   renderAll(norm, preds);
-  // store for CSV download
-  window._lastFetched = {norm, preds};
+  window._lastFetched = { norm, preds };
 }
 
 /* CSV button */
-btnCSV.addEventListener('click', ()=>{
+btnCSV.addEventListener('click', ()=> {
   const s = window._lastFetched;
   if (!s) return alert('No data fetched');
   const csv = generateCSV(s.norm, s.preds);
   const blob = new Blob([csv], {type:'text/csv'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url;
-  a.download = 'krishibandhu_data.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+  a.href = url; a.download = 'krishibandhu_data.csv'; a.click(); URL.revokeObjectURL(url);
 });
 
-/* Refresh */
-btnRefresh.addEventListener('click', async ()=> {
-  await refreshAll();
-});
+/* refresh button */
+btnRefresh.addEventListener('click', refreshAll);
 
-/* status helper */
-function setStatus(txt) { statusEl.textContent = txt; }
-
-/* language handling */
-let currentLangCode = 'en';
-function currentLang() { return () => currentLangCode; }
+/* language */
 function applyLang(code) {
-  currentLangCode = code;
-  titleEl.textContent = STR[code].title;
-  samplesLabel.textContent = STR[code].samplesLabel;
-  setStatus(STR[code].statusIdle);
-  recommendTitle.textContent = STR[code].recommendTitle;
+  document.getElementById('title').textContent = STR[code].title;
+  document.getElementById('samplesLabel').textContent = STR[code].samplesLabel;
   noteEl.textContent = STR[code].note;
   imgTitle.textContent = STR[code].imgTitle;
   imgDesc.textContent = STR[code].imgDesc;
+  recommendTitle.textContent = STR[code].recommendTitle;
+  setStatus(STR[code].statusIdle);
 }
-langSelect.addEventListener('change', (e)=> applyLang(e.target.value));
-applyLang('en');
+langSelect.addEventListener('change', e => applyLang(e.target.value));
 
-/* image upload & preview */
-imgInput.addEventListener('change', (ev)=>{
-  const f = ev.target.files && ev.target.files[0];
+/* image preview & camera */
+imgInput.addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
   if (!f) return;
-  const url = URL.createObjectURL(f);
-  preview.src = url;
-  preview.dataset.file = '';
-  preview.dataset.blob = f;
+  preview.src = URL.createObjectURL(f); preview.dataset.blob = f;
 });
-
-/* camera capture fallback */
-btnCam.addEventListener('click', async ()=>{
-  // create a camera capture input
+btnCam.addEventListener('click', ()=> {
   const capture = document.createElement('input');
-  capture.type = 'file';
-  capture.accept = 'image/*';
-  capture.capture = 'environment';
-  capture.onchange = (e)=> {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    preview.src = URL.createObjectURL(f);
-    preview.dataset.blob = f;
-  };
+  capture.type='file'; capture.accept='image/*'; capture.capture='environment';
+  capture.onchange = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; preview.src = URL.createObjectURL(f); preview.dataset.blob = f; };
   capture.click();
 });
 
-/* Load TF.js model & predict */
-let loadedModel = null;
-btnPredictModel.addEventListener('click', async ()=>{
+/* Load leaf model and predict on uploaded image */
+const LEAF_LABELS = ["Healthy","Blast","Bacterial Blight","Brown Spot"]; // replace with your labels if different
+
+btnPredictModel.addEventListener('click', async () => {
   if (!preview.src) { alert('Upload or capture an image first'); return; }
-  setStatus(STR[langSelect.value].predictionLoading);
-  if (!loadedModel) {
-    try {
-      loadedModel = await tf.loadLayersModel('/model/model.json'); // must exist in repo
-    } catch (e) {
-      console.error(e);
-      alert('Model load failed. Put model files at /model/model.json and weights shards.');
-      setStatus('Model load failed');
-      return;
-    }
+  setStatus(STR[langSelect.value].predictionLoading || "Loading model...");
+  // ensure model loaded (attempt load now if not preloaded)
+  if (!MODELS.leaf) {
+    MODELS.leaf = await tryLoadFromCandidates(MODEL_PATHS.leaf, "Leaf");
+    if (!MODELS.leaf) { setStatus("Leaf model not found. Check model_for_github/model/leaf_tfjs/"); return; }
   }
-  // preprocess image into tensor
-  const imgEl = document.createElement('img');
-  imgEl.src = preview.src;
-  await imgEl.decode();
-  // resize/crop: depends on model input size; here we assume 224x224
-  const tensor = tf.browser.fromPixels(imgEl).resizeNearestNeighbor([224,224]).toFloat().div(255.0).expandDims(0);
-  const out = loadedModel.predict(tensor);
-  const probs = Array.from(out.dataSync());
-  // For simplicity, we show top label — you must maintain labels file or hardcode
-  // Example labels:
-  const labels = ["Healthy","Blast","Bacterial Blight","Brown Spot"];
-  const topIdx = probs.indexOf(Math.max(...probs));
-  predictionResult.innerHTML = `Prediction: <b>${labels[topIdx]}</b> (confidence: ${(probs[topIdx]*100).toFixed(1)}%)`;
-  setStatus(STR[langSelect.value].statusIdle);
+  try {
+    // decode image into tensor
+    const imgEl = document.createElement('img');
+    imgEl.src = preview.src;
+    await imgEl.decode();
+    const INPUT_SIZE = 224; // change if your model expects different size
+    const t = tf.browser.fromPixels(imgEl).resizeNearestNeighbor([INPUT_SIZE,INPUT_SIZE]).toFloat().div(tf.scalar(255.0)).expandDims(0);
+    let preds = MODELS.leaf.predict(t);
+    if (Array.isArray(preds)) preds = preds[0];
+    const probs = Array.from(await preds.data());
+    const topIdx = probs.indexOf(Math.max(...probs));
+    predictionResult.innerHTML = `Prediction: <b>${LEAF_LABELS[topIdx] || ("Class " + topIdx)}</b> — ${(probs[topIdx]*100).toFixed(1)}%`;
+    t.dispose();
+    if (preds.dispose) preds.dispose();
+    setStatus(STR[langSelect.value].statusIdle);
+  } catch (e) {
+    console.error(e);
+    setStatus("Prediction error (see console).");
+    predictionResult.textContent = "Prediction failed: " + (e.message || e);
+  }
 });
 
-/* initial note about CORS */
+/* initial note */
 noteEl.textContent = STR.en.note;
-
 </script>
 </body>
 </html>
