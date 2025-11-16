@@ -1,666 +1,664 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Krishibandhu — Smart Farming Dashboard</title>
+#@title 🚀 One-click: Streamlit app + Roboflow + ngrok (Colab, white bg / black text)
+import sys, subprocess, os, time, pathlib, getpass
 
-  <!-- Chart.js -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- TensorFlow.js (for disease model & numeric models) -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
+# 0) Install runtime deps (quiet)
+subprocess.check_call([sys.executable, "-m", "pip", "-q", "install",
+                       "streamlit", "pyngrok==7.2.1", "plotly",
+                       "pillow", "numpy", "pandas", "tensorflow",
+                       "requests", "roboflow"])
 
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:0; background:#0f1724; color:#e6eef8}
-    header{padding:18px;background:#0b1220;display:flex;gap:12px;align-items:center}
-    h1{margin:0;font-size:18px}
-    .container{padding:18px;max-width:1200px;margin:0 auto}
-    .row{display:flex;gap:18px;flex-wrap:wrap}
-    .card{background:#0b1220;border-radius:10px;padding:14px;flex:1;min-width:280px;box-shadow:0 6px 18px rgba(0,0,0,.6)}
-    label,input,select,button{font-size:14px}
-    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    canvas{background:#071020;border-radius:8px;padding:8px}
-    .latest{display:flex;gap:12px;flex-wrap:wrap}
-    .latest div{background:#06111a;padding:8px;border-radius:6px;min-width:120px}
-    .lang{margin-left:auto}
-    .small{font-size:13px;color:#98a8b9}
-    .uploader{display:flex;gap:8px;align-items:center}
-    .recommend{margin-top:10px;background:#071826;padding:10px;border-radius:8px}
-    #status{font-weight:600}
-  </style>
-</head>
-<body>
-  <header>
-    <h1 id="title">Krishibandhu — Smart Farming Dashboard</h1>
-    <div class="lang">
-      <select id="langSelect" title="Language"><option value="en">English</option><option value="hi">हिन्दी</option><option value="bn">বাংলা</option></select>
-    </div>
-  </header>
+# 1) Write your Streamlit app (NOTE: no %%writefile inside)
+APP_PATH = "/content/streamlit_app.py"
+code = r'''
+import os, io, pickle, tempfile, requests, sys
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-  <div class="container">
-    <div class="row">
-      <div class="card" style="flex:2">
-        <div class="controls">
-          <label for="sampleSelect" class="small" id="samplesLabel">Samples:</label>
-          <select id="sampleSelect">
-            <option value="100">Last 100</option>
-            <option value="200">Last 200</option>
-            <option value="500">Last 500</option>
-            <option value="1000">Last 1000</option>
-          </select>
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from PIL import Image, ImageDraw
+import streamlit as st
+import plotly.graph_objects as go
 
-          <button id="btnRefresh">Refresh</button>
-          <button id="btnCSV">Download CSV</button>
+# =================== CONFIG ===================
+IST = ZoneInfo("Asia/Kolkata")
 
-          <label class="small">Auto-predict when no data</label>
-          <input type="checkbox" id="autoPredict" checked />
+# ThingSpeak channels
+TS_ACTUAL_CHANNEL_ID = 3007544   # Actuals (fields 1..4)
+TS_PRED_CHANNEL_ID   = 3068374   # Predicted (fields 1..4)
+TS_RESULTS_TO_FETCH  = 96
 
-          <div style="margin-left:auto" class="small" id="status">Status: idle</div>
-        </div>
+FIELDS = {
+    1: ("temperature",  "Temperature (°C)"),
+    2: ("humidity",     "Humidity (%)"),
+    3: ("rainMmHr",     "Rain (mm/hr)"),
+    4: ("soilMoisture", "Soil Moisture (%)"),
+}
+MODEL_DIR = "/content/models"
+LOOKBACK  = 4  # adjust to match your LSTM
 
-        <hr style="opacity:.08"/>
+# --- Rice disease model (PASTE YOUR EXACT COLAB PATHS HERE) ---
+RICE_MODEL_PATH  = "/content/best_model.keras"   # <- change to your path
+RICE_LABELS_PATH = "/content/labels (3).txt"     # <- change to your path
+RICE_IMG_SIZE    = (256, 256)
+SHOW_DEBUG = False
 
-        <div class="latest" id="latestValues" aria-live="polite"></div>
+# =================== ROBOFLOW (server-side only; never shown in UI) ===================
+from roboflow import Roboflow
+# Using your provided key/workspace/project/version:
+RF_KEY = os.environ.get("ROBOFLOW_API_KEY", "yhffXQ6NGin9SpzaaCjI")
+rf_model = None
+try:
+    rf = Roboflow(api_key=RF_KEY)
+    project = rf.workspace("debarpita").project("plant-detection-xi9rv")
+    rf_model = project.version(2).model
+except Exception as e:
+    rf_model = None
+    print("Roboflow init error:", e, file=sys.stderr)
 
-        <hr style="opacity:.08"/>
+ROBOFLOW_CONFIDENCE = 40
+ROBOFLOW_OVERLAP    = 30
 
-        <canvas id="chartTemp" height="140"></canvas>
-        <canvas id="chartRain" height="140" style="margin-top:18px"></canvas>
-        <canvas id="chartHum" height="140" style="margin-top:18px"></canvas>
-        <canvas id="chartSoil" height="140" style="margin-top:18px"></canvas>
+# =================== HELPERS ===================
+def ts_fetch_channel(channel_id: int, results: int) -> Dict:
+    url = f"https://api.thingspeak.com/channels/{channel_id}/feeds.json"
+    r = requests.get(url, params={"results": results}, timeout=60)
+    r.raise_for_status()
+    return r.json()
 
-      </div>
+def ts_channel_to_df(channel_json: Dict, prefix: str) -> pd.DataFrame:
+    feeds = channel_json.get("feeds", [])
+    rows = []
+    for f in feeds:
+        try:
+            ts_ist = pd.to_datetime(f.get("created_at"), utc=True).tz_convert(IST)
+        except Exception:
+            continue
+        row = {"Timestamp": ts_ist}
+        for i in range(1, 9):
+            v = f.get(f"field{i}")
+            try:
+                row[f"{prefix}_field{i}"] = float(v) if v is not None else np.nan
+            except Exception:
+                row[f"{prefix}_field{i}"] = np.nan
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.dropna(subset=["Timestamp"]).sort_values("Timestamp").reset_index(drop=True)
 
-      <div class="card" style="flex:1;min-width:320px">
-        <h3 id="imgTitle">Rice Leaf Disease Detection</h3>
-        <div class="small" id="imgDesc">Upload or capture an image. A pretrained TF.js model (model.json) must be in /model_for_github/model/leaf_tfjs/</div>
+def merge_actual_pred_df(df_act: pd.DataFrame, df_pred: pd.DataFrame) -> pd.DataFrame:
+    if df_act.empty and df_pred.empty:
+        return pd.DataFrame()
+    # ✅ correct usage
+    df = pd.merge(df_act, df_pred, on="Timestamp", how="outer").sort_values("Timestamp").reset_index(drop=True)
+    return df
 
-        <div class="uploader" style="margin-top:10px">
-          <input id="imgInput" accept="image/*" type="file" />
-          <button id="btnCam">Use Camera</button>
-        </div>
+# ---------- Model loading (server-side from /content/models) with cache ----------
+@st.cache_resource(show_spinner=False)
+def load_all_models() -> Dict[str, Tuple[tf.keras.Model, object]]:
+    out = {}
+    for idx, (tag, _label) in FIELDS.items():
+        h5_path  = os.path.join(MODEL_DIR, f"{tag}.h5")
+        pkl_path = os.path.join(MODEL_DIR, f"{tag}_scaler.pkl")
+        if os.path.exists(h5_path) and os.path.exists(pkl_path):
+            try:
+                model = tf.keras.models.load_model(h5_path, compile=False)
+                with open(pkl_path, "rb") as f:
+                    scaler = pickle.load(f)
+                out[tag] = (model, scaler)
+            except Exception as e:
+                print(f"[models] {tag} load error: {e}", file=sys.stderr)
+        else:
+            print(f"[models] {tag} missing: {h5_path}, {pkl_path}", file=sys.stderr)
+    return out
 
-        <div style="margin-top:10px">
-          <img id="preview" alt="preview" style="max-width:100%;border-radius:8px;margin-top:8px"/>
-        </div>
+def ensure_series(values: List[float], lookback: int) -> List[float]:
+    vals = [v for v in values if v is not None and not np.isnan(v)]
+    if not vals:
+        return []
+    if len(vals) < lookback:
+        pad = [vals[-1]] * (lookback - len(vals))
+        return vals + pad
+    return vals
 
-        <div style="margin-top:10px">
-          <button id="btnPredictModel">Load Model & Predict</button>
-          <div id="predictionResult" class="small" style="margin-top:10px"></div>
-        </div>
+def predict_series_lenient(values: List[float], model, scaler, lookback: int, n_points: int) -> List[Optional[float]]:
+    preds = [None] * n_points
+    vals = [float(v) if v is not None else np.nan for v in values]
+    s = pd.Series(vals).replace([np.inf, -np.inf], np.nan).ffill().bfill()
+    base = s.tolist()
+    if len(base) == 0:
+        return preds
+    if len(base) < lookback:
+        window = ensure_series(base, lookback)[-lookback:]
+        arr = np.array(window, dtype=np.float32).reshape(-1,1)
+        Xs  = scaler.transform(arr)[None, ...]
+        y_scaled = model.predict(Xs, verbose=0)
+        y = float(scaler.inverse_transform(y_scaled.reshape(-1,1)).ravel()[0])
+        preds[-1] = y
+        return preds
+    arr = np.array(base, dtype=np.float32).reshape(-1,1)
+    arr_scaled = scaler.transform(arr)
+    for t in range(lookback, n_points):
+        X = arr_scaled[t-lookback:t].reshape(1, lookback, 1)
+        y_scaled = model.predict(X, verbose=0)
+        y = float(scaler.inverse_transform(y_scaled.reshape(-1,1)).ravel()[0])
+        preds[t] = y
+    return preds
 
-        <hr style="opacity:.08"/>
+def latest_pair(df: pd.DataFrame, idx: int) -> Tuple[Optional[float], Optional[float]]:
+    if df.empty: return None, None
+    a = df.get(f"actual_field{idx}", pd.Series(dtype=float)).dropna()
+    p_ext = df.get(f"pred_field{idx}", pd.Series(dtype=float))
+    p_loc = df.get(f"pred_local_{idx}", pd.Series(dtype=float))
+    a_val = float(a.iloc[-1]) if not a.empty else None
+    p_val = None
+    if p_ext is not None:
+        p_ext = pd.Series(p_ext).dropna()
+        if not p_ext.empty: p_val = float(p_ext.iloc[-1])
+    if p_val is None and p_loc is not None:
+        p_loc = pd.Series(p_loc).dropna()
+        if not p_loc.empty: p_val = float(p_loc.iloc[-1])
+    return a_val, p_val
 
-        <h4 id="recommendTitle">Recommendations</h4>
-        <div id="recommendations" class="recommend small"></div>
+def latest_pref(df: pd.DataFrame, idx: int) -> Optional[float]:
+    if df.empty: return None
+    a = df.get(f"actual_field{idx}", pd.Series(dtype=float)).dropna()
+    if not a.empty: return float(a.iloc[-1])
+    p = df.get(f"pred_field{idx}", pd.Series(dtype=float))
+    if p is not None:
+        p = pd.Series(p).dropna()
+        if not p.empty: return float(p.iloc[-1])
+    pl = df.get(f"pred_local_{idx}", pd.Series(dtype=float))
+    if pl is not None:
+        pl = pd.Series(pl).dropna()
+        if not pl.empty: return float(pl.iloc[-1])
+    return None
 
-        <hr style="opacity:.08"/>
+def build_recommendations(T: float, H: float, R: float, S: float, lang: str) -> List[str]:
+    lines = []
+    if S < 35 and R < 1:
+        lines.append({"en":"Soil moisture is low. Irrigate now (short cycle).",
+                      "hi":"मृदा नमी कम है। अभी सिंचाई करें (कम अवधि)।",
+                      "bn":"মাটির আর্দ্রতা কম। এখনই স্বল্প সময়ের জন্য সেচ দিন।"}[lang])
+    if R >= 2:
+        lines.append({"en":"Rain is significant. Avoid irrigation; defer fertilizer.",
+                      "hi":"बारिश पर्याप्त है। सिंचाई न करें; उर्वरक बाद में दें।",
+                      "bn":"বৃষ্টি যথেষ্ট। সেচ দেবেন না; সার পরে দিন।"}[lang])
+    if T > 35 and H < 30:
+        lines.append({"en":"High heat + low humidity. Prefer evening irrigation; provide shade.",
+                      "hi":"उच्च तापमान व कम आर्द्रता। संध्या में सिंचाई करें; छाया दें।",
+                      "bn":"উচ্চ তাপমাত্রা ও কম আর্দ্রতা। সন্ধ্যায় সেচ দিন; ছায়া দিন।"}[lang])
+    if S > 80:
+        lines.append({"en":"Soil saturated. Improve drainage; pause irrigation.",
+                      "hi":"मृदा संतृप्त। निकास सुधारें; सिंचाई रोकें।",
+                      "bn":"মাটি স্যাচুরেটেড। নিষ্কাশন বাড়ান; সেচ বন্ধ রাখুন।"}[lang])
+    if not lines:
+        lines.append({"en":"Conditions normal. Continue routine schedule.",
+                      "hi":"स्थिति सामान्य। नियमित कार्यक्रम जारी रखें।",
+                      "bn":"পরিস্থিতি স্বাভাবিক। রুটিন অনুযায়ী চলুন।"}[lang])
+    return lines
 
-        <div class="small">Data source: ThingSpeak telemetry (reads)</div>
-        <div class="small" id="note"></div>
-      </div>
-    </div>
-  </div>
+# ---------- Roboflow detection ----------
+def rf_predict_image_to_counts(image: Image.Image) -> Tuple[Image.Image, Dict[str,int]]:
+    if rf_model is None:
+        raise RuntimeError("Roboflow not configured on the server.")
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        image.save(tmp.name, format="JPEG", quality=95)
+        res = rf_model.predict(tmp.name, confidence=ROBOFLOW_CONFIDENCE, overlap=ROBOFLOW_OVERLAP).json()
+    preds = res.get("predictions", [])
+    draw = ImageDraw.Draw(image)
+    colors = {"healthy": (0,200,0), "partially healthy": (255,165,0), "unhealthy": (255,0,0)}
+    counts = {}
+    for p in preds:
+        cls = p.get("class") or "unknown"
+        x,y,w,h = float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])
+        x1,y1 = int(x-w/2), int(y-h/2); x2,y2 = int(x+w/2), int(y+h/2)
+        col = colors.get(cls, (255,255,255))
+        draw.rectangle([x1,y1,x2,y2], outline=col, width=3)
+        tag = cls
+        tw = int(7.0*len(tag)) + 10
+        draw.rectangle([x1, max(0,y1-20), x1+tw, y1], fill=col)
+        draw.text((x1+5, max(0,y1-18)), tag, fill=(255,255,255))
+        counts[cls] = counts.get(cls, 0)+1
+    return image, counts
 
-<script>
-/* ========== KEYS & ThingSpeak config ========== */
-const KEYS = ["temperature", "rainrate", "humidity", "soil_moisture"];
+def verdict_from_counts(counts: Dict[str,int], lang: str) -> str:
+    h  = counts.get("healthy", 0)
+    ph = counts.get("partially healthy", 0)
+    uh = counts.get("unhealthy", 0)
+    if uh > 0 and uh >= max(h, ph): return {"en":"Unhealthy","hi":"अस्वस्थ","bn":"অসুস্থ"}[lang]
+    if ph > 0 and ph >= max(h, uh): return {"en":"Partially Healthy","hi":"आंशिक रूप से स्वस्थ","bn":"আংশিক সুস্থ"}[lang]
+    if h  > 0:                     return {"en":"Healthy","hi":"स्वस्थ","bn":"সুস্থ"}[lang]
+    return {"en":"Unknown","hi":"अज्ञात","bn":"অজানা"}[lang]
 
-/* ThingSpeak configuration (READ keys used for reads) */
-const THINGSPEAK = {
-  ACTUAL_CHANNEL_ID: 3007544,
-  ACTUAL_READ_KEY:   "M5Y79EDJWV6KETHL",   // read key for actual channel
-  PRED_CHANNEL_ID:   3068374,
-  PRED_READ_KEY:     "56K9Z12DA5EK1YEM"    // read key for pred channel
-};
-
-/* Map our KEYS to ThingSpeak field names (adjust if your channel uses different mapping) */
-const TS_FIELDS_ACTUAL = {
-  temperature: "field1",
-  humidity:    "field2",
-  rainrate:    "field3",
-  soil_moisture: "field4"
-};
-const TS_FIELDS_PRED = {
-  temperature: "field1",
-  humidity:    "field2",
-  rainrate:    "field3",
-  soil_moisture: "field4"
-};
-
-/* ========== i18n ========== */
-const STR = {
-  en: {
-    title: "Krishibandhu — Smart Farming Dashboard",
-    samplesLabel: "Samples:",
-    statusIdle: "Status: idle",
-    statusLoading: "Status: loading...",
-    predictionLoading: "Loading model...",
-    recommendTitle:"Recommendations",
-    note: "Reads come from ThingSpeak (feeds.json). If CORS blocks reads, host this page where requests allowed or use a small proxy.",
-    imgTitle:"Rice Leaf Disease Detection",
-    imgDesc:"Upload or capture an image. A TF.js model must be in model_for_github/model/leaf_tfjs/"
-  },
-  hi: { title:"कृषिबंधु — स्मार्ट फ़ार्मिंग डैशबोर्ड", samplesLabel:"नमूने:", statusIdle:"स्थिति: निष्क्रिय", statusLoading:"स्थिति: लोड हो रही...", predictionLoading:"मॉडल लोड हो रहा है...", recommendTitle:"सुझाव", note:"पठित डाटा ThingSpeak থেকে আসে। यदि CORS अवरुद्ध हो, प्रॉक्सी का उपयोग करें।", imgTitle:"धान पत्ता रोग पहचान", imgDesc:"इमेज अपलोड करें या कैप्चर करें। TF.js मॉडल model_for_github/model/leaf_tfjs/ में रखें।" },
-  bn: { title:"Krishibandhu — স্মার্ট ফার্মিং ড্যাশবোর্ড", samplesLabel:"নমুনা:", statusIdle:"স্ট্যাটাস: নিষ্ক্রিয়", statusLoading:"স্ট্যাটাস: লোড হচ্ছে...", predictionLoading:"মডেল লোড হচ্ছে...", recommendTitle:"প্রস্তাবনা", note:"পঠিত ডেটা ThingSpeak থেকে আসে। যদি CORS ব্লক করে, প্রোক্সি ব্যবহার করুন।", imgTitle:"ধান পাতা রোগ সনাক্তকরণ", imgDesc:"ছবি আপলোড বা ক্যাপচার করুন। TF.js মডেল model_for_github/model/leaf_tfjs/ এ রাখুন।" }
-};
-
-/* ========== DOM elements ========== */
-const statusEl = document.getElementById('status');
-const latestEl = document.getElementById('latestValues');
-const sampleSelect = document.getElementById('sampleSelect');
-const btnRefresh = document.getElementById('btnRefresh');
-const btnCSV = document.getElementById('btnCSV');
-const autoPredictEl = document.getElementById('autoPredict');
-const langSelect = document.getElementById('langSelect');
-const recommendEl = document.getElementById('recommendations');
-const noteEl = document.getElementById('note');
-const titleEl = document.getElementById('title');
-const samplesLabel = document.getElementById('samplesLabel');
-const imgInput = document.getElementById('imgInput');
-const preview = document.getElementById('preview');
-const btnPredictModel = document.getElementById('btnPredictModel');
-const predictionResult = document.getElementById('predictionResult');
-const btnCam = document.getElementById('btnCam');
-const imgTitle = document.getElementById('imgTitle');
-const imgDesc = document.getElementById('imgDesc');
-const recommendTitle = document.getElementById('recommendTitle');
-
-/* Charts */
-let chartTemp, chartRain, chartHum, chartSoil;
-function makeChart(ctx, label) {
-  return new Chart(ctx, {
-    type: 'line',
-    data: { labels: [], datasets: [
-      { label: label+' (Actual)', data: [], fill:false, tension:0.2, borderWidth:2 },
-      { label: label+' (Predicted)', data: [], fill:false, tension:0.2, borderDash:[6,4], borderWidth:2 }
-    ]},
-    options: { responsive:true, interaction:{mode:'index',intersect:false}, plugins:{legend:{position:'top'}} }
-  });
+# =================== UI TEXTS ===================
+LANGS = {"English":"en", "हिन्दी":"hi", "বাংলা":"bn"}
+TEXTS = {
+    "title": {"en":"Krishibandhu Field Dashboard","hi":"कृषिबंधु फील्ड डैशबोर्ड","bn":"কৃষিবন্ধু ফিল্ড ড্যাশবোর্ড"},
+    "last_updated":{"en":"Last updated (IST)","hi":"अंतिम अद्यतन (IST)","bn":"শেষ আপডেট (IST)"},
+    "header_all":{"en":"Latest (IST) — Actual / Predicted","hi":"नवीनतम (IST) — Actual / Predicted","bn":"সর্বশেষ (IST) — Actual / Predicted"},
+    "charts":{"en":"Actual vs Predicted","hi":"वास्तविक बनाम अनुमानित","bn":"বাস্তব বনাম পূর্বাভাস"},
+    "download_all":{"en":"Download merged CSV (Actual+Pred)","hi":"मर्ज़्ड CSV डाउनलोड (Actual+Pred)","bn":"মার্জড CSV ডাউনলোড (Actual+Pred)"},
+    "recommendations":{"en":"Recommendations","hi":"सिफारिशें","bn":"প্রস্তাবনা"},
+    "plant":{"en":"Plant Health (Upload / Click → Detect)","hi":"पौधे का स्वास्थ्य (अपलोड / कैमरा → डिटेक्ट)","bn":"উদ্ভিদের স্বাস্থ্য (আপলোড / ক্যামেরা → ডিটেক্ট)"},
+    "upload_img":{"en":"Upload plant image","hi":"पौधे की तस्वीर अपলোड करें","bn":"গাছের ছবি আপলোড করুন"},
+    "click_img":{"en":"Or click a photo (webcam)","hi":"या फोटो क्लिक करें (वेबकैम)","bn":"অথবা ছবি তুলুন (ওয়েবক্যাম)"},
+    "run":{"en":"Run Detection","hi":"डिटेक्शन चलाएँ","bn":"ডিটেকশন চালান"},
+    "counts":{"en":"Detected counts","hi":"डिटेक्टेड गिनती","bn":"সনাক্ত সংখ্যা"},
+    "verdict":{"en":"Health verdict","hi":"स्वास्थ्य निष्कर्ष","bn":"স্বাস্থ্য রায়"},
+    "rice_title":{"en":"Rice Leaf Disease Detection","hi":"धान पत्ती रोग पहचान","bn":"ধানের পাতা রোগ সনাক্তকরণ"},
+    "rice_upload":{"en":"Upload a rice leaf image","hi":"धान की पत्ती की छवि अपলোड करें","bn":"ধানের পাতার ছবি আপলোড করুন"},
+    "rice_run":{"en":"Classify Disease","hi":"रोग वर्गीकृत करें","bn":"রোগ শ্রেণীকরণ করুন"},
 }
 
-/* ---------- Startup: load charts and then models + initial data ---------- */
-window.addEventListener('load', () => {
-  chartTemp = makeChart(document.getElementById('chartTemp').getContext('2d'), 'Temperature (°C)');
-  chartRain = makeChart(document.getElementById('chartRain').getContext('2d'), 'Rain Rate (mm/hr)');
-  chartHum  = makeChart(document.getElementById('chartHum').getContext('2d'), 'Humidity (%)');
-  chartSoil = makeChart(document.getElementById('chartSoil').getContext('2d'), 'Soil Moisture');
-  applyLang('en');
+# =================== PAGE SETUP & LIGHT THEME (white bg, black text) ===================
+st.set_page_config(page_title="Krishibandhu Dashboard", layout="wide")
+st.markdown("""
+<style>
+/* Global light theme */
+html, body, .stApp { background:#ffffff !important; color:#000000 !important; }
 
-  // Attempt to load models, then run the initial fetch+predict and start polling
-  loadAllModels().then(() => {
-    refreshAll_andPlot().catch(e => console.error("initial refresh error", e));
-    startAutoPolling();
-  });
-});
-
-/* ========== Model candidate paths ========== */
-const MODEL_PATHS = {
-  leaf: [
-    "./model_for_github/model/leaf_tfjs/model.json",
-    "/model_for_github/model/leaf_tfjs/model.json"
-  ],
-  temperature: [
-    "./model_for_github/temperature/model.json",
-    "./model_for_github/temperature/group1-shard1of1.bin"
-  ],
-  humidity: [
-    "./model_for_github/humidity/model.json"
-  ],
-  rain: [
-    "./model_for_github/rainMmHr/model.json"
-  ],
-  soil: [
-    "./model_for_github/soilMoisture/model.json"
-  ]
-};
-
-const MODELS = { leaf: null, temperature: null, humidity: null, rain: null, soil: null };
-
-function setStatus(txt) { statusEl.textContent = txt; }
-
-async function tryLoadFromCandidates(candidates, friendlyName) {
-  for (const url of candidates) {
-    try {
-      setStatus(`Trying ${friendlyName} model: ${url}`);
-      const m = await tf.loadLayersModel(url);
-      setStatus(`${friendlyName} model loaded`);
-      console.log(`Loaded ${friendlyName} model from`, url);
-      return m;
-    } catch (e) {
-      console.warn(`Failed to load ${friendlyName} from ${url}:`, e);
-    }
-  }
-  setStatus(`${friendlyName} model not found in candidates`);
-  return null;
+/* Main page container */
+.block-container {
+  background: rgba(255,255,255,0.98);
+  padding: 1rem 1.2rem;
+  border-radius: 14px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.06);
+  color:#000 !important;
 }
 
-async function loadAllModels() {
-  MODELS.leaf = await tryLoadFromCandidates(MODEL_PATHS.leaf, "Leaf");
-  MODELS.temperature = await tryLoadFromCandidates(MODEL_PATHS.temperature, "Temperature");
-  MODELS.humidity = await tryLoadFromCandidates(MODEL_PATHS.humidity, "Humidity");
-  MODELS.rain = await tryLoadFromCandidates(MODEL_PATHS.rain, "Rain");
-  MODELS.soil = await tryLoadFromCandidates(MODEL_PATHS.soil, "Soil");
-  const loaded = Object.entries(MODELS).filter(([,v])=>v).map(([k])=>k);
-  setStatus(loaded.length ? `Models loaded: ${loaded.join(", ")}` : "No TFJS models loaded (using fallback predictors).");
+/* Force common text to black */
+.stMarkdown, .stMarkdown p, .stCaption, .caption, label,
+[data-testid="stSidebar"] *, [data-testid="stMetricValue"],
+[data-testid="stMetricLabel"], [data-testid="stMetricDelta"],
+.st-emotion-cache, .stText, .stTextInput, .stAlert, .stDataFrame,
+[data-baseweb="select"] * { color:#000 !important; }
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+  background:#f7f7f7 !important;
+  border-right: 1px solid #e6e6e6;
 }
 
-/* ========== ThingSpeak read helpers (replaces ThingsBoard reads) ========== */
+/* Selectbox / inputs */
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+  background:#fff !important;
+  color:#000 !important;
+  border-radius:10px !important;
+  border:1px solid #d0d0d0 !important;
+}
+[data-testid="stSelectbox"] svg { fill:#000 !important; }
 
-/**
- * Fetch feeds.json for a ThingSpeak channel.
- * returns parsed JSON (object with .feeds array).
- */
-async function fetchThingSpeakFeeds(channelId, readKey=null, results=100) {
-  const url = `https://api.thingspeak.com/channels/${channelId}/feeds.json?results=${results}` + (readKey ? `&api_key=${encodeURIComponent(readKey)}` : '');
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`ThingSpeak HTTP ${res.status}`);
-  return await res.json();
+/* Buttons / downloads */
+.stButton > button, .stDownloadButton > button {
+  background:#81c784 !important; /* soft green */
+  color:#000 !important;
+  border: 1px solid #5fb96b !important;
+  border-radius:10px !important;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  background:#66bb6a !important; color:#000 !important;
 }
 
-/**
- * Build a telemetry-like object (same shape as earlier code expected)
- * from ThingSpeak feeds for the ACTUAL channel.
- * returns: { temperature: [{ts, value}, ...], rainrate: [...], ... }
- */
-async function fetchTelemetryFromThingSpeak(limit=100) {
-  setStatus(STR[langSelect.value].statusLoading || "Loading...");
-  try {
-    const data = await fetchThingSpeakFeeds(THINGSPEAK.ACTUAL_CHANNEL_ID, THINGSPEAK.ACTUAL_READ_KEY, limit);
-    const feeds = data.feeds || [];
-    // build per-key arrays
-    const out = {};
-    for (const k of KEYS) out[k] = [];
-    for (const f of feeds) {
-      // ThingSpeak created_at is like "2025-11-16T12:34:56Z"
-      const ts = f.created_at ? (new Date(f.created_at)).getTime() : Date.now();
-      // map fields
-      for (const k of KEYS) {
-        const field = TS_FIELDS_ACTUAL[k];
-        if (!field) continue;
-        const raw = f[field];
-        if (raw === null || raw === undefined || raw === "") continue;
-        const val = Number(raw);
-        if (isNaN(val)) continue;
-        out[k].push({ ts: ts, value: val });
-      }
-    }
-    setStatus(STR[langSelect.value].statusIdle || "Idle");
-    return out;
-  } catch (e) {
-    console.error("fetchTelemetryFromThingSpeak error", e);
-    setStatus('Failed to load from ThingSpeak — check CORS or channel/read key');
-    return null;
-  }
+/* Metric cards */
+[data-testid="stMetric"] {
+  background:#ffffff;
+  color:#000 !important;
+  border-radius:12px;
+  padding:10px 12px;
+  border:1px solid #e0e0e0;
 }
 
-/* Original normalizeData expects an object with keys mapped to arrays of {ts,value} */
-function normalizeData(tsObj) {
-  const map = new Map();
-  for (const k of KEYS) {
-    const arr = tsObj[k] || [];
-    for (const item of arr) {
-      const t = item.ts;
-      if (!map.has(t)) map.set(t, { ts: t });
-      map.get(t)[k] = Number(item.value);
-    }
-  }
-  const arr = Array.from(map.values()).sort((a,b)=>a.ts-b.ts);
-  return arr.map(r=> ({...r, time: new Date(r.ts).toLocaleString()}));
+/* Plotly container */
+.js-plotly-plot, .plot-container, .stPlotlyChart { background:transparent !important; }
+
+/* Title */
+.kb-title {
+  color:#000 !important; font-weight:800 !important; line-height:1.25 !important;
+  background: #fff; display:block; padding:12px 16px;
+  border-radius:14px; box-shadow:0 4px 16px rgba(0,0,0,0.06); margin: 2px 0 8px 0;
+  text-align:center; word-break:break-word; white-space:normal; overflow:visible; width:100%;
 }
 
-/* ---------- Prediction helpers (unchanged) ---------- */
-
-const POLL_MS = 15 * 60 * 1000; // 15 minutes
-const PREDICT_HORIZON = 96;
-
-function buildActualArrays(normData) {
-  const actualByKey = {};
-  for (const k of KEYS) actualByKey[k] = normData.map(r => (r[k] === undefined ? null : Number(r[k])));
-  const labels = normData.map(r => r.time);
-  return { actualByKey, labels };
+/* Verdict pill keeps white text for contrast */
+.kb-verdict-pill, .kb-verdict-pill * {
+  color:#fff !important;
+  font-weight:700;
+  display:inline-block;
+  padding:6px 12px;
+  border-radius:999px;
+  line-height:1.2;
 }
+</style>
+""", unsafe_allow_html=True)
 
-function linearPredictFromLast(normData, key, horizon) {
-  const series = normData.map(r => (r[key] === undefined ? null : Number(r[key])));
-  const history = series.filter(v => v !== null).slice(-6);
-  const preds = [];
-  if (history.length === 0) {
-    for (let i=0;i<horizon;i++) preds.push(0);
-    return preds;
-  }
-  if (history.length === 1) {
-    for (let i=0;i<horizon;i++) preds.push(history[0]);
-    return preds;
-  }
-  const x = history.map((_,i)=>i+1);
-  const y = history;
-  const n = x.length;
-  const sumX = x.reduce((a,b)=>a+b,0), sumY = y.reduce((a,b)=>a+b,0);
-  const sumXY = x.reduce((a,b,i)=>a + b*y[i],0), sumX2 = x.reduce((a,b)=>a + b*b,0);
-  const denom = n*sumX2 - sumX*sumX;
-  const slope = denom === 0 ? 0 : (n*sumXY - sumX*sumY)/denom;
-  const intercept = (sumY - slope*sumX)/n;
-  for (let i=1;i<=horizon;i++) preds.push(intercept + slope*(n+i));
-  return preds;
-}
+# Language selector
+lang_label = st.sidebar.selectbox("Language", list(LANGS.keys()), index=0)
+LANG = {"English":"en", "हिन्दी":"hi", "বাংলা":"bn"}[lang_label]
 
-async function computePredictedSeries(normData) {
-  const { actualByKey, labels } = buildActualArrays(normData);
-  const last = normData.length ? normData[normData.length-1] : null;
-  const horizon = Math.min(PREDICT_HORIZON, 96);
+# Title
+st.markdown(f"<h1 class='kb-title'>{TEXTS['title'][LANG]}</h1>", unsafe_allow_html=True)
 
-  const predictedByKey = {};
-  for (const k of KEYS) predictedByKey[k] = new Array(normData.length).fill(null);
+# ---- Fetch ThingSpeak
+try:
+    js_actual = ts_fetch_channel(TS_ACTUAL_CHANNEL_ID, TS_RESULTS_TO_FETCH)
+    js_pred   = ts_fetch_channel(TS_PRED_CHANNEL_ID,   TS_RESULTS_TO_FETCH)
+    df_act    = ts_channel_to_df(js_actual, "actual")
+    df_pred   = ts_channel_to_df(js_pred,   "pred")
+    df_merge  = merge_actual_pred_df(df_act, df_pred)
+    st.caption(f"{TEXTS['last_updated'][LANG]}: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+except Exception as e:
+    st.error(f"Failed to read ThingSpeak: {e}")
+    df_merge = pd.DataFrame()
 
-  const canUseTFJS = (k) => !!MODELS[k];
+# ---- Optional local predictions
+@st.cache_resource(show_spinner=False)
+def _models():
+    return load_all_models()
+models = _models()
+for idx in range(1,5):
+    tag, _label = FIELDS[idx]
+    a_col = f"actual_field{idx}"
+    if df_merge.empty or a_col not in df_merge.columns:
+        continue
+    try:
+        if tag not in models:
+            print(f"[predict] {tag}: model not loaded; skipping", file=sys.stderr)
+            continue
+        p_col = f"pred_field{idx}"
+        need_local = (p_col not in df_merge.columns) or pd.Series(df_merge.get(p_col)).isna().all()
+        if not need_local:
+            continue
+        model, scaler = models[tag]
+        vals = df_merge[a_col].astype(float).replace([np.inf, -np.inf], np.nan).tolist()
+        preds = predict_series_lenient(vals, model, scaler, LOOKBACK, len(df_merge))
+        df_merge[f"pred_local_{idx}"] = preds
+    except Exception as e:
+        print(f"[predict] {tag}: {e}", file=sys.stderr)
 
-  let intervalMs = 15*60*1000;
-  if (normData.length > 1) intervalMs = normData[normData.length-1].ts - normData[normData.length-2].ts;
-  const futureTimestamps = [];
-  let lastTs = normData.length ? normData[normData.length-1].ts : Date.now();
-  for (let i=1;i<=horizon;i++) { lastTs += intervalMs; futureTimestamps.push({ ts: lastTs, time: new Date(lastTs).toLocaleString() }); }
+# ---- Headline metrics
+st.subheader(TEXTS["header_all"][LANG])
+row = st.columns(4)
+labels = ["Temperature (°C)","Rain (mm/hr)","Humidity (%)","Soil Moisture (%)"]
+order  = [1,3,2,4]
+for c, idx, lab in zip(row, order, labels):
+    a, p = latest_pair(df_merge, idx)
+    c.metric(lab, f"{a:.2f}" if a is not None else "--", delta=f"Pred {p:.2f}" if p is not None else "Pred --")
 
-  for (const key of KEYS) {
-    if (canUseTFJS(key)) {
-      try {
-        let lastValue = (last && last[key] !== undefined) ? Number(last[key]) : 0;
-        const preds = [];
-        for (let i=0;i<horizon;i++) {
-          const inputTensor = tf.tensor2d([[ lastValue ]], [1, 1]);
-          let out = MODELS[key].predict(inputTensor);
-          if (Array.isArray(out)) out = out[0];
-          const arr = await out.data();
-          const nextVal = Number(arr[0]);
-          preds.push(nextVal);
-          lastValue = nextVal;
-          inputTensor.dispose(); if (out.dispose) out.dispose();
-        }
-        for (let i=0;i<horizon;i++) predictedByKey[key].push(preds[i]);
-      } catch (e) {
-        console.warn("TFJS predict failed for", key, e);
-        const fallback = linearPredictFromLast(normData, key, horizon);
-        for (let i=0;i<horizon;i++) predictedByKey[key].push(fallback[i]);
-      }
-    } else {
-      const fallback = linearPredictFromLast(normData, key, horizon);
-      for (let i=0;i<horizon;i++) predictedByKey[key].push(fallback[i]);
-    }
-  }
+# ---- Charts
+st.subheader(TEXTS["charts"][LANG])
+cc = st.columns(2)
 
-  const combinedLabels = labels.slice();
-  for (const f of futureTimestamps) combinedLabels.push(f.time);
+def style_axes(fig):
+    fig.update_layout(
+        template="none",
+        height=380,
+        margin=dict(l=20, r=20, t=50, b=100),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        font=dict(color="#000000"),
+        legend=dict(
+            bgcolor="rgba(255,255,255,0.95)",
+            bordercolor="rgba(0,0,0,0.12)",
+            borderwidth=1,
+            font=dict(color="#000000")
+        )
+    )
+    fig.update_xaxes(
+        title_text="Time (IST)",
+        title_standoff=16,
+        tickformat="%H:%M",
+        tickangle=-30,
+        nticks=8,
+        showline=True,
+        linecolor="#000000",
+        gridcolor="rgba(0,0,0,0.12)",
+        zeroline=False,
+        automargin=True
+    )
+    fig.update_yaxes(
+        tickfont=dict(color="#000000"),
+        titlefont=dict(color="#000000"),
+        gridcolor="rgba(0,0,0,0.12)",
+        showline=True,
+        linecolor="#000000",
+        zeroline=False,
+        automargin=True
+    )
 
-  return { predictedByKey, combinedLabels, horizon };
-}
+for idx in range(1,5):
+    tag, label = FIELDS[idx]
+    if df_merge.empty:
+        with cc[(idx-1)%2]:
+            st.info(f"{label}: no data")
+        continue
 
-/* ---------- Main refresh + plotting (uses ThingSpeak only) ---------- */
-async function refreshAll_andPlot() {
-  const limit = Number(sampleSelect.value);
+    pred_series = None
+    if f"pred_field{idx}" in df_merge.columns and not pd.Series(df_merge[f"pred_field{idx}"]).isna().all():
+        pred_series = df_merge[f"pred_field{idx}"]
+    elif f"pred_local_{idx}" in df_merge.columns:
+        pred_series = df_merge[f"pred_local_{idx}"]
 
-  // 1) Try to fetch actual telemetry from ThingSpeak
-  const tsObj = await fetchTelemetryFromThingSpeak(limit);
+    df_tidy = pd.DataFrame({
+        "Timestamp": df_merge["Timestamp"].dt.tz_convert(IST),
+        "Actual": df_merge.get(f"actual_field{idx}", pd.Series(dtype=float)),
+        "Predicted": pred_series if pred_series is not None else pd.Series([None]*len(df_merge)),
+    })
 
-  if (tsObj) {
-    const norm = normalizeData(tsObj);
-    if (norm && norm.length > 0) {
-      // we have actuals — compute predicted tail and plot
-      setStatus("Computing predictions for actual data...");
-      const { predictedByKey, combinedLabels, horizon } = await computePredictedSeries(norm);
-      // pad actual arrays to match combinedLabels and update charts
-      const actualByKey = {};
-      for (const k of KEYS) {
-        const arr = norm.map(r => (r[k] === undefined ? null : Number(r[k])));
-        for (let i=0;i<horizon;i++) arr.push(null);
-        actualByKey[k] = arr;
-      }
-      // update latest panel with last actual
-      latestEl.innerHTML = '';
-      const last = norm.length ? norm[norm.length-1] : null;
-      for (const key of KEYS) {
-        const v = last && last[key] !== undefined ? last[key].toFixed(3) : '—';
-        const div = document.createElement('div');
-        div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
-        latestEl.appendChild(div);
-      }
-      // update charts
-      function updateChart(ch, key) {
-        ch.data.labels = combinedLabels;
-        ch.data.datasets[0].data = actualByKey[key];
-        ch.data.datasets[1].data = predictedByKey[key];
-        ch.update();
-      }
-      updateChart(chartTemp, 'temperature');
-      updateChart(chartRain, 'rainrate');
-      updateChart(chartHum, 'humidity');
-      updateChart(chartSoil, 'soil_moisture');
+    with cc[(idx-1)%2]:
+        fig = go.Figure()
+        if df_tidy["Actual"].notna().any():
+            fig.add_trace(go.Scatter(x=df_tidy["Timestamp"], y=df_tidy["Actual"], mode="lines", name="Actual"))
+        if df_tidy["Predicted"].notna().any():
+            fig.add_trace(go.Scatter(x=df_tidy["Timestamp"], y=df_tidy["Predicted"], mode="lines",
+                                     name="Predicted", line=dict(dash="dash")))
+        fig.update_layout(title=dict(text=label, y=0.98, x=0.5, xanchor="center", yanchor="top"))
+        style_axes(fig)
+        st.plotly_chart(fig, use_container_width=True)
 
-      // recommendations
-      const rc = [];
-      if (last) {
-        const t = last.temperature; if (t !== undefined && t !== null) { if (t > 35) rc.push("High temperature: consider irrigation and shading."); else if (t < 18) rc.push("Low temperature: monitor seedling heat protection."); }
-        if (last.humidity !== undefined && last.humidity > 80) rc.push("High humidity: risk of fungal disease. Check leaves.");
-        if (last.rainrate !== undefined && last.rainrate > 10) rc.push("Heavy rain: protect crops from water logging.");
-      }
-      recommendEl.innerHTML = rc.length ? rc.map(x=>`• ${x}`).join("<br>") : "No specific recommendations.";
-      window._lastFetched = { norm, predictedByKey, combinedLabels };
-      setStatus("Updated actual vs predicted (last run).");
-      return;
-    }
-  }
+# ---- CSV download (IST)
+if not df_merge.empty:
+    df_dl = df_merge.copy()
+    df_dl["Timestamp"] = df_dl["Timestamp"].dt.tz_convert(IST).astype(str)
+    keep_cols = (["Timestamp"] +
+                 [f"actual_field{i}" for i in range(1,5)] +
+                 [f"pred_field{i}" for i in range(1,5) if f"pred_field{i}" in df_merge.columns] +
+                 [f"pred_local_{i}" for i in range(1,5) if f"pred_local_{i}" in df_merge.columns])
+    existing = [c for c in keep_cols if c in df_dl.columns]
+    st.download_button(TEXTS["download_all"][LANG], data=df_dl[existing].to_csv(index=False).encode("utf-8"),
+                       file_name="thingspeak_actual_pred_IST.csv", mime="text/csv")
 
-  // 2) No actuals present — try to load predictions from ThingSpeak prediction channel
-  setStatus("No recent actual telemetry — attempting to load predictions from ThingSpeak pred channel...");
-  try {
-    const predJson = await fetchThingSpeakFeeds(THINGSPEAK.PRED_CHANNEL_ID, THINGSPEAK.PRED_READ_KEY, limit);
-    const feeds = predJson.feeds || [];
-    const map = new Map();
-    for (const f of feeds) {
-      const ts = f.created_at ? (new Date(f.created_at)).getTime() : Date.now();
-      if (!map.has(ts)) map.set(ts, { ts: ts, time: new Date(ts).toLocaleString() });
-      // map predicted fields to keys
-      for (const k of KEYS) {
-        const field = TS_FIELDS_PRED[k];
-        if (!field) continue;
-        const raw = f[field];
-        if (raw === null || raw === undefined || raw === "") continue;
-        const val = Number(raw);
-        if (isNaN(val)) continue;
-        map.get(ts)[k] = val;
-      }
-    }
-    const predArr = Array.from(map.values()).sort((a,b)=>a.ts-b.ts);
-    if (predArr.length > 0) {
-      // we have pred-only series — plot predicted series (actuals null)
-      const labels = predArr.map(r=>r.time);
-      const predictedByKey = {};
-      const actualByKey = {};
-      for (const k of KEYS) {
-        predictedByKey[k] = predArr.map(r => r[k] === undefined ? null : Number(r[k]));
-        actualByKey[k] = new Array(predictedByKey[k].length).fill(null);
-      }
-      latestEl.innerHTML = '';
-      const lastPred = predArr.length ? predArr[predArr.length-1] : null;
-      for (const key of KEYS) {
-        const v = lastPred && lastPred[key] !== undefined ? lastPred[key].toFixed(3) : '—';
-        const div = document.createElement('div');
-        div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
-        latestEl.appendChild(div);
-      }
-      function updateChart(ch, key) {
-        ch.data.labels = labels;
-        ch.data.datasets[0].data = actualByKey[key];
-        ch.data.datasets[1].data = predictedByKey[key];
-        ch.update();
-      }
-      updateChart(chartTemp, 'temperature');
-      updateChart(chartRain, 'rainrate');
-      updateChart(chartHum, 'humidity');
-      updateChart(chartSoil, 'soil_moisture');
+# ---- Recommendations
+T_last = latest_pref(df_merge, 1) or 28.0
+H_last = latest_pref(df_merge, 2) or 60.0
+R_last = latest_pref(df_merge, 3) or 0.0
+S_last = latest_pref(df_merge, 4) or 40.0
 
-      recommendEl.innerHTML = "Predicted values shown (no actual telemetry).";
-      window._lastFetched = { norm: [], predictedByKey, combinedLabels: labels };
-      setStatus("Showing predictions from ThingSpeak.");
-      return;
-    }
-  } catch (e) {
-    console.warn("Failed to load predicted telemetry from ThingSpeak:", e);
-  }
+st.subheader(TEXTS["recommendations"][LANG])
+for line in build_recommendations(T_last, H_last, R_last, S_last, LANG):
+    st.markdown(f"- {line}")
 
-  // 3) fallback to in-memory predictions if available
-  if (window._lastFetched && window._lastFetched.predictedByKey) {
-    setStatus("No current telemetry. Using last in-memory predictions.");
-    const predictedByKey = window._lastFetched.predictedByKey;
-    const combinedLabels = window._lastFetched.combinedLabels || [];
-    const actualByKey = {};
-    for (const k of KEYS) actualByKey[k] = new Array(combinedLabels.length).fill(null);
-    function updateChart(ch, key) {
-      ch.data.labels = combinedLabels;
-      ch.data.datasets[0].data = actualByKey[key];
-      ch.data.datasets[1].data = predictedByKey[key];
-      ch.update();
-    }
-    updateChart(chartTemp, 'temperature');
-    updateChart(chartRain, 'rainrate');
-    updateChart(chartHum, 'humidity');
-    updateChart(chartSoil, 'soil_moisture');
+# =================== PLANT HEALTH (Upload / Click → Detect) ===================
+st.subheader(TEXTS["plant"][LANG])
 
-    latestEl.innerHTML = '';
-    const lastPredVal = (() => {
-      const kb = predictedByKey;
-      const anyKey = KEYS[0];
-      const arr = kb[anyKey] || [];
-      const lastIdx = arr.length - 1;
-      if (lastIdx < 0) return null;
-      const rec = {};
-      for (const k of KEYS) rec[k] = (kb[k] && kb[k][lastIdx] !== undefined) ? kb[k][lastIdx] : null;
-      return rec;
-    })();
-    for (const key of KEYS) {
-      const v = lastPredVal && lastPredVal[key] !== null ? lastPredVal[key].toFixed(3) : '—';
-      const div = document.createElement('div');
-      div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
-      latestEl.appendChild(div);
-    }
+if "open_cam" not in st.session_state:
+    st.session_state.open_cam = False
 
-    recommendEl.innerHTML = "Showing last in-memory predictions (no telemetry).";
-    setStatus("Displayed cached predictions.");
-    return;
-  }
+colL, colR = st.columns([0.55, 0.45])
+with colL:
+    uploaded_img = st.file_uploader(TEXTS["upload_img"][LANG], type=["jpg","jpeg","png"])
 
-  // final fallback: nothing to show
-  setStatus("No telemetry or predictions available.");
-  latestEl.innerHTML = '';
-  recommendEl.innerHTML = "No data available.";
-  function clearChart(ch) { ch.data.labels = []; ch.data.datasets[0].data = []; ch.data.datasets[1].data = []; ch.update(); }
-  clearChart(chartTemp); clearChart(chartRain); clearChart(chartHum); clearChart(chartSoil);
-}
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Click Photo"):
+            st.session_state.open_cam = True
+    with c2:
+        if st.session_state.open_cam and st.button("Close Camera"):
+            st.session_state.open_cam = False
 
-let pollHandle = null;
-function startAutoPolling() {
-  if (pollHandle) clearInterval(pollHandle);
-  pollHandle = setInterval(() => {
-    refreshAll_andPlot().catch(e => console.error("refresh error", e));
-  }, POLL_MS);
-}
+    camera_img = None
+    if st.session_state.open_cam:
+        camera_img = st.camera_input(TEXTS["click_img"][LANG])
 
-/* CSV download */
-function generateCSV(data, preds) {
-  const rows = [];
-  const headers = ["time"];
-  for (const k of KEYS) {
-    headers.push(`${k}_actual`);
-    headers.push(`${k}_predicted`);
-  }
-  rows.push(headers.join(','));
-  const predMap = new Map((preds||[]).map(p=>[p.ts, p]));
-  const allTimes = new Set([...(data||[]).map(d=>d.ts), ...(preds||[]).map(p=>p.ts)]);
-  const timesSorted = Array.from(allTimes).sort((a,b)=>a-b);
-  for (const t of timesSorted) {
-    const recAct = (data||[]).find(r=>r.ts===t) || {};
-    const recPred = predMap.get(t) || {};
-    const timeStr = new Date(t).toLocaleString();
-    const cells = [timeStr];
-    for (const k of KEYS) {
-      cells.push(recAct[k] !== undefined ? recAct[k] : '');
-      cells.push(recPred[k] !== undefined ? recPred[k] : '');
-    }
-    rows.push(cells.join(','));
-  }
-  return rows.join('\n');
-}
+    src_img = camera_img if camera_img is not None else uploaded_img
 
-btnCSV.addEventListener('click', ()=> {
-  const s = window._lastFetched;
-  if (!s) return alert('No data fetched');
-  const csv = generateCSV(s.norm, s.preds || []);
-  const blob = new Blob([csv], {type:'text/csv'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = 'krishibandhu_data.csv'; a.click(); URL.revokeObjectURL(url);
-});
+    if st.button(TEXTS["run"][LANG]) and src_img is not None:
+        try:
+            if rf_model is None:
+                st.error("Roboflow not configured on server.")
+            else:
+                img = Image.open(src_img).convert("RGB")
+                out_img, counts = rf_predict_image_to_counts(img.copy())
+                st.image(out_img, caption="Annotated", use_container_width=True)
+                st.markdown(f"**{TEXTS['counts'][LANG]}:** `{counts}`")
+                verdict = verdict_from_counts(counts, LANG)
+                st.markdown(f"**{TEXTS['verdict'][LANG]}:** {verdict}")
+                buf = io.BytesIO(); out_img.save(buf, format="PNG")
+                st.download_button("Download annotated image", data=buf.getvalue(),
+                                   file_name="annotated.png", mime="image/png")
+        except Exception as e:
+            print("Plant health error:", e, file=sys.stderr)
+            st.error("Prediction failed. Please try another image.")
 
-/* refresh button */
-btnRefresh.addEventListener('click', refreshAll_andPlot);
+with colR:
+    st.metric("Temperature (last)", f"{T_last:.2f} °C")
+    st.metric("Rain (last)", f"{R_last:.2f} mm/hr")
+    st.metric("Humidity (last)", f"{H_last:.2f} %")
+    st.metric("Soil Moisture (last)", f"{S_last:.2f} %")
 
-/* language */
-function applyLang(code) {
-  document.getElementById('title').textContent = STR[code].title;
-  document.getElementById('samplesLabel').textContent = STR[code].samplesLabel;
-  noteEl.textContent = STR[code].note;
-  imgTitle.textContent = STR[code].imgTitle;
-  imgDesc.textContent = STR[code].imgDesc;
-  recommendTitle.textContent = STR[code].recommendTitle;
-  setStatus(STR[code].statusIdle);
-}
-langSelect.addEventListener('change', e => applyLang(e.target.value));
+# =================== RICE LEAF DISEASE (server .keras + labels) ===================
+st.markdown("---")
+st.header(TEXTS["rice_title"][LANG])
 
-/* image preview & camera */
-imgInput.addEventListener('change', e => {
-  const f = e.target.files && e.target.files[0];
-  if (!f) return;
-  preview.src = URL.createObjectURL(f); preview.dataset.blob = f;
-});
-btnCam.addEventListener('click', ()=> {
-  const capture = document.createElement('input');
-  capture.type='file'; capture.accept='image/*'; capture.capture='environment';
-  capture.onchange = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; preview.src = URL.createObjectURL(f); preview.dataset.blob = f; };
-  capture.click();
-});
+@st.cache_resource(show_spinner=False)
+def load_rice_model_and_labels():
+    model, labels = None, []
+    if os.path.exists(RICE_MODEL_PATH) and os.path.isfile(RICE_MODEL_PATH):
+        try:
+            model = tf.keras.models.load_model(RICE_MODEL_PATH, compile=False)
+        except Exception as e:
+            print(f"[rice] load model error from {RICE_MODEL_PATH}: {e}", file=sys.stderr)
+    if os.path.exists(RICE_LABELS_PATH) and os.path.isfile(RICE_LABELS_PATH):
+        try:
+            with open(RICE_LABELS_PATH, "r", encoding="utf-8") as f:
+                labels = [ln.strip() for ln in f if ln.strip()]
+        except Exception as e:
+            print(f"[rice] load labels error from {RICE_LABELS_PATH}: {e}", file=sys.stderr)
+    return model, labels
 
-/* Load leaf model and predict on uploaded image */
-const LEAF_LABELS = ["Healthy","Blast","Bacterial Blight","Brown Spot"]; // replace with your labels if different
+def rice_preprocess_colab_style(pil_img: Image.Image, size: Tuple[int,int]=(256,256)) -> np.ndarray:
+    img = pil_img.convert("RGB").resize(size, Image.BILINEAR)
+    arr = np.array(img, dtype=np.float32)
+    return np.expand_dims(arr, axis=0)
 
-btnPredictModel.addEventListener('click', async () => {
-  if (!preview.src) { alert('Upload or capture an image first'); return; }
-  setStatus(STR[langSelect.value].predictionLoading || "Loading model...");
-  if (!MODELS.leaf) {
-    MODELS.leaf = await tryLoadFromCandidates(MODEL_PATHS.leaf, "Leaf");
-    if (!MODELS.leaf) { setStatus("Leaf model not found. Check model_for_github/model/leaf_tfjs/"); return; }
-  }
-  try {
-    const imgEl = document.createElement('img');
-    imgEl.src = preview.src;
-    await imgEl.decode();
-    const INPUT_SIZE = 224; // change if your model expects different size
-    const t = tf.browser.fromPixels(imgEl).resizeNearestNeighbor([INPUT_SIZE,INPUT_SIZE]).toFloat().div(tf.scalar(255.0)).expandDims(0);
-    let preds = MODELS.leaf.predict(t);
-    if (Array.isArray(preds)) preds = preds[0];
-    const probs = Array.from(await preds.data());
-    const topIdx = probs.indexOf(Math.max(...probs));
-    predictionResult.innerHTML = `Prediction: <b>${LEAF_LABELS[topIdx] || ("Class " + topIdx)}</b> — ${(probs[topIdx]*100).toFixed(1)}%`;
-    t.dispose();
-    if (preds.dispose) preds.dispose();
-    setStatus(STR[langSelect.value].statusIdle);
-  } catch (e) {
-    console.error(e);
-    setStatus("Prediction error (see console).");
-    predictionResult.textContent = "Prediction failed: " + (e.message || e);
-  }
-});
+def to_probs(vec: np.ndarray) -> np.ndarray:
+    z = np.array(vec, dtype=np.float32).reshape(-1)
+    if z.size == 0:
+        return z
+    if (z.min() >= 0.0) and (z.max() <= 1.0) and (abs(z.sum() - 1.0) < 1e-3):
+        return z
+    x = z - z.max()
+    e = np.exp(x)
+    return e / np.sum(e)
 
-/* initial note */
-noteEl.textContent = STR.en.note;
-</script>
-</body>
-</html>
+rice_model, rice_labels = load_rice_model_and_labels()
+
+colA, colB = st.columns([0.55, 0.45])
+with colA:
+    rice_img_file = st.file_uploader(TEXTS["rice_upload"][LANG], type=["jpg","jpeg","png"], key="rice_up")
+    run_rice = st.button(TEXTS["rice_run"][LANG])
+
+    if run_rice:
+        if rice_model is None:
+            st.error("Rice model not found. Please set RICE_MODEL_PATH to your .keras file and rerun.")
+        elif rice_img_file is None:
+            st.warning("Please upload an image first.")
+        else:
+            try:
+                pil = Image.open(rice_img_file).convert("RGB")
+                X = rice_preprocess_colab_style(pil, RICE_IMG_SIZE)
+                raw = rice_model.predict(X, verbose=0)
+                raw = np.asarray(raw)
+                if raw.ndim > 1:
+                    raw = raw[0]
+                probs = to_probs(raw)
+                top_idx = int(np.argmax(probs))
+                cls_name = rice_labels[top_idx] if 0 <= top_idx < len(rice_labels) else f"class_{top_idx}"
+                conf = float(probs[top_idx]) * 100.0
+                st.image(pil, use_container_width=True)
+                st.caption({"en":"Verdict", "hi":"निष्कर्ष", "bn":"রায়"}[LANG])
+                # Render pill
+                color_map = {"healthy":"#2e7d32","blight":"#c62828","smut":"#6a1b9a","brown spot":"#ef6c00"}
+                def _verdict_color(lbl):
+                    l = (lbl or "").lower()
+                    if "healthy" in l: return "#2e7d32"
+                    if "blight" in l:  return "#c62828"
+                    if "smut" in l:    return "#6a1b9a"
+                    if "brown" in l and "spot" in l: return "#ef6c00"
+                    return "#00695c"
+                def localize_rice_label(raw_label: str, lang: str) -> str:
+                    RICE_VERDICT = {
+                        "brown spot": {"en": "Brown Spot", "hi": "ब्राउन स्पॉट", "bn": "ব্রাউন স্পট"},
+                        "leaf smut": {"en": "Leaf Smut", "hi": "लीफ स्मट", "bn": "লিফ স্মাট"},
+                        "bacterial leaf blight": {"en": "Bacterial Leaf Blight", "hi": "बैक्टीरियल लीफ ब्लाइट", "bn": "ব্যাকটেরিয়াল লিফ ব্লাইট"},
+                        "healthy": {"en": "Healthy", "hi": "स्वस्थ", "bn": "সুস্থ"},
+                        "normal": {"en": "Healthy", "hi": "स्वस्थ", "bn": "সুস্থ"},
+                    }
+                    key = (raw_label or "").strip().lower().replace("_"," ").replace("-"," ")
+                    if key in RICE_VERDICT:
+                        return RICE_VERDICT[key].get(lang, RICE_VERDICT[key]["en"])
+                    generic = {"en": f"Disease: {raw_label}", "hi": f"रोग: {raw_label}", "bn": f"রোগ: {raw_label}"}
+                    return generic.get(lang, f"Disease: {raw_label}")
+                localized = localize_rice_label(cls_name, LANG)
+                color = _verdict_color(cls_name)
+                st.markdown(f"<div class='kb-verdict-pill' style='background:{color};'>{localized} — {conf:.2f}%</div>", unsafe_allow_html=True)
+                # Table
+                if len(rice_labels) >= len(probs) and len(probs) > 1:
+                    names = rice_labels[:len(probs)]
+                    dfp = pd.DataFrame({
+                        "Class": names,
+                        "Confidence (%)": (probs*100.0).round(2)
+                    }).sort_values("Confidence (%)", ascending=False, ignore_index=True)
+                    st.dataframe(dfp, use_container_width=True)
+                else:
+                    st.write("Pred vector:", probs.round(4))
+            except Exception as e:
+                print("Rice detection error:", e, file=sys.stderr)
+                st.error("Classification failed. Make sure your server model expects 256×256 RGB images.")
+with colB:
+    if rice_model is not None and len(rice_labels) > 0:
+        st.caption("Rice model & labels loaded.")
+    elif rice_model is not None:
+        st.caption("Rice model loaded (labels optional).")
+    else:
+        st.caption("Set RICE_MODEL_PATH and rerun.")
+'''
+open(APP_PATH, "w", encoding="utf-8").write(code)
+print(f"✅ Wrote {APP_PATH} ({len(code.splitlines())} lines)")
+
+# 2) Clean any prior processes
+os.system("pkill -f streamlit  || true")
+os.system("pkill -f ngrok      || true")
+
+# 3) Start Streamlit in the background and show tail of its log
+log_path = "/content/s.log"
+proc = subprocess.Popen(
+    ["streamlit", "run", APP_PATH, "--server.port", "8501", "--server.address", "0.0.0.0"],
+    stdout=open(log_path, "w"), stderr=subprocess.STDOUT
+)
+time.sleep(5)
+print("----- streamlit log tail -----")
+try:
+    print(pathlib.Path(log_path).read_text()[-1200:])
+except Exception as e:
+    print("No log yet:", e)
+
+# 4) Open ngrok tunnel (optionally set region='in')
+from pyngrok import ngrok
+AUTHTOKEN = getpass.getpass("🔑 Paste your ngrok auth token: ")
+ngrok.set_auth_token(AUTHTOKEN)
+public_url = ngrok.connect(8501, "http", bind_tls=True, options={"region":"in"}).public_url
+print("\n🌍 Your app is live at:", public_url, "\n")
