@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Krishibandhu — Smart Farming Dashboard</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- TensorFlow.js (for disease model) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
+
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:0; background:#0f1724; color:#e6eef8}
+    header{padding:18px;background:#0b1220;display:flex;gap:12px;align-items:center}
+    h1{margin:0;font-size:18px}
+    .container{padding:18px;max-width:1200px;margin:0 auto}
+    .row{display:flex;gap:18px;flex-wrap:wrap}
+    .card{background:#0b1220;border-radius:10px;padding:14px;flex:1;min-width:280px;box-shadow:0 6px 18px rgba(0,0,0,.6)}
+    label,input,select,button{font-size:14px}
+    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    canvas{background:#071020;border-radius:8px;padding:8px}
+    .latest{display:flex;gap:12px;flex-wrap:wrap}
+    .latest div{background:#06111a;padding:8px;border-radius:6px;min-width:120px}
+    .lang{margin-left:auto}
+    .small{font-size:13px;color:#98a8b9}
+    .uploader{display:flex;gap:8px;align-items:center}
+    .recommend{margin-top:10px;background:#071826;padding:10px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="title">Krishibandhu — Smart Farming Dashboard</h1>
+    <div class="lang">
+      <select id="langSelect" title="Language"><option value="en">English</option><option value="hi">हिन्दी</option><option value="bn">বাংলা</option></select>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="row">
+      <div class="card" style="flex:2">
+        <div class="controls">
+          <label for="sampleSelect" class="small" id="samplesLabel">Samples:</label>
+          <select id="sampleSelect">
+            <option value="100">Last 100</option>
+            <option value="200">Last 200</option>
+            <option value="500">Last 500</option>
+            <option value="1000">Last 1000</option>
+          </select>
+
+          <button id="btnRefresh">Refresh</button>
+          <button id="btnCSV">Download CSV</button>
+
+          <label class="small">Auto-predict when no data</label>
+          <input type="checkbox" id="autoPredict" checked />
+
+          <div style="margin-left:auto" class="small" id="status">Status: idle</div>
+        </div>
+
+        <hr style="opacity:.08"/>
+
+        <div class="latest" id="latestValues" aria-live="polite">
+          <!-- latest values will appear here -->
+        </div>
+
+        <hr style="opacity:.08"/>
+
+        <canvas id="chartTemp" height="140"></canvas>
+        <canvas id="chartRain" height="140" style="margin-top:18px"></canvas>
+        <canvas id="chartHum" height="140" style="margin-top:18px"></canvas>
+        <canvas id="chartSoil" height="140" style="margin-top:18px"></canvas>
+
+      </div>
+
+      <div class="card" style="flex:1;min-width:320px">
+        <h3 id="imgTitle">Rice Leaf Disease Detection</h3>
+        <div class="small" id="imgDesc">Upload or capture an image. A pretrained TF.js model (model.json) must be in /model/</div>
+
+        <div class="uploader" style="margin-top:10px">
+          <input id="imgInput" accept="image/*" type="file" />
+          <button id="btnCam">Use Camera</button>
+        </div>
+
+        <div style="margin-top:10px">
+          <img id="preview" alt="preview" style="max-width:100%;border-radius:8px;margin-top:8px"/>
+        </div>
+
+        <div style="margin-top:10px">
+          <button id="btnPredictModel">Load Model & Predict</button>
+          <div id="predictionResult" class="small" style="margin-top:10px"></div>
+        </div>
+
+        <hr style="opacity:.08"/>
+
+        <h4 id="recommendTitle">Recommendations</h4>
+        <div id="recommendations" class="recommend small"></div>
+
+        <hr style="opacity:.08"/>
+
+        <div class="small">Data source: ThingsBoard device telemetry</div>
+        <div class="small" id="note"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* =====================
+   CONFIG — update if needed
+   ===================== */
+const CONFIG = {
+  TB_HOST: "https://demo.thingsboard.io",
+  TB_DEVICE_ID: "e55ec190-87b8-11f0-a9b5-792e2194a5d4",
+  TB_JWT: "Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJkZWJhcnBpdGFfcGhkMjJAaWlpdGthbHlhbmkuYWMu..."
+  // shorten for display; replace full token here
+};
+
+const KEYS = ["temperature", "rainrate", "humidity", "soil_moisture"];
+/* ===================== */
+
+/* i18n strings */
+const STR = {
+  en: {
+    title: "Krishibandhu — Smart Farming Dashboard",
+    samplesLabel: "Samples:",
+    statusIdle: "Status: idle",
+    statusLoading: "Status: loading...",
+    predictionLoading: "Loading model...",
+    recommendTitle:"Recommendations",
+    note: "If ThingsBoard blocks CORS, configure a small proxy or host the site where requests allowed.",
+    imgTitle:"Rice Leaf Disease Detection",
+    imgDesc:"Upload or capture an image. A pretrained TF.js model must be in /model/",
+  },
+  hi: {
+    title: "কৃষিবন্ধু — स्मार्ट फ़ार्मिंग डैशबोर्ड",
+    samplesLabel:"नमूने:",
+    statusIdle:"स्थिति: निष्क्रिय",
+    statusLoading:"स्थिति: लोड हो रही...",
+    predictionLoading:"मॉडल लोड हो रहा है...",
+    recommendTitle:"सुझाव",
+    note:"यदि ThingsBoard CORS अवरुद्ध करता है, तो एक छोटा प्रॉक्सी कॉन्फ़िगर करें।",
+    imgTitle:"धान पत्ता रोग पहचान",
+    imgDesc:"इमेज अपलोड करें या कैप्चर करें। TF.js मॉडल /model/ में रखें।"
+  },
+  bn: {
+    title: "Krishibandhu — স্মার্ট ফার্মিং ড্যাশবোর্ড",
+    samplesLabel:"নমুনা:",
+    statusIdle:"স্ট্যাটাস: নিষ্ক্রিয়",
+    statusLoading:"স্ট্যাটাস: লোড হচ্ছে...",
+    predictionLoading:"মডেল লোড হচ্ছে...",
+    recommendTitle:"প্রস্তাবনা",
+    note:"যদি ThingsBoard CORS ব্লক করে, একটি প্রোক্সি ব্যবহার করুন।",
+    imgTitle:"ধান পাতা রোগ সনাক্তকরণ",
+    imgDesc:"ছবি আপলোড বা ক্যাপচার করুন। TF.js মডেল /model/ এ রাখুন।"
+  }
+};
+
+/* DOM */
+const statusEl = document.getElementById('status');
+const latestEl = document.getElementById('latestValues');
+const sampleSelect = document.getElementById('sampleSelect');
+const btnRefresh = document.getElementById('btnRefresh');
+const btnCSV = document.getElementById('btnCSV');
+const autoPredictEl = document.getElementById('autoPredict');
+const langSelect = document.getElementById('langSelect');
+const recommendEl = document.getElementById('recommendations');
+const noteEl = document.getElementById('note');
+const titleEl = document.getElementById('title');
+const samplesLabel = document.getElementById('samplesLabel');
+const imgInput = document.getElementById('imgInput');
+const preview = document.getElementById('preview');
+const btnPredictModel = document.getElementById('btnPredictModel');
+const predictionResult = document.getElementById('predictionResult');
+const btnCam = document.getElementById('btnCam');
+const imgTitle = document.getElementById('imgTitle');
+const imgDesc = document.getElementById('imgDesc');
+const recommendTitle = document.getElementById('recommendTitle');
+
+/* Charts */
+let chartTemp, chartRain, chartHum, chartSoil;
+
+function makeChart(ctx, label) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [
+      { label: label+' (Actual)', data: [], fill:false, tension:0.2, borderWidth:2 },
+      { label: label+' (Predicted)', data: [], fill:false, tension:0.2, borderDash:[6,4], borderWidth:2 }
+    ]},
+    options: { responsive:true, interaction:{mode:'index',intersect:false}, plugins:{legend:{position:'top'}} }
+  });
+}
+
+window.addEventListener('load', () => {
+  chartTemp = makeChart(document.getElementById('chartTemp').getContext('2d'), 'Temperature (°C)');
+  chartRain = makeChart(document.getElementById('chartRain').getContext('2d'), 'Rain Rate (mm/hr)');
+  chartHum  = makeChart(document.getElementById('chartHum').getContext('2d'), 'Humidity (%)');
+  chartSoil = makeChart(document.getElementById('chartSoil').getContext('2d'), 'Soil Moisture');
+
+  refreshAll();
+});
+
+/* ThingsBoard timeseries API:
+   GET /api/plugins/telemetry/DEVICE/{deviceId}/values/timeseries?keys=temperature,humidity
+   Use Authorization: Bearer <token>
+*/
+async function fetchTelemetry(limit=100) {
+  setStatus(STR[currentLang()].statusLoading);
+  try {
+    const keys = KEYS.join(',');
+    // ThingsBoard timeseries endpoint (returns arrays of {ts, value} for each key)
+    const url = `${CONFIG.TB_HOST}/api/plugins/telemetry/DEVICE/${CONFIG.TB_DEVICE_ID}/values/timeseries?keys=${encodeURIComponent(keys)}&limit=${limit}`;
+    const res = await fetch(url, { headers: { "Authorization": CONFIG.TB_JWT }});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json(); // object with arrays for each key
+    setStatus(`${STR[currentLang()].statusIdle}`);
+    return data;
+  } catch (e) {
+    console.error('fetchTelemetry error', e);
+    setStatus('Failed to load — check CORS or token');
+    return null;
+  }
+}
+
+/* Convert timeseries object to sorted array by timestamp of "records" with all keys combined */
+function normalizeData(tsObj) {
+  // tsObj: {temperature: [{ts:..., value:...}, ...], humidity: [...] }
+  const map = new Map();
+  for (const k of KEYS) {
+    const arr = tsObj[k] || [];
+    for (const item of arr) {
+      const t = item.ts;
+      if (!map.has(t)) map.set(t, { ts: t });
+      map.get(t)[k] = Number(item.value);
+    }
+  }
+  // to array sorted by ts
+  const arr = Array.from(map.values()).sort((a,b)=>a.ts-b.ts);
+  // convert ts to ISO
+  return arr.map(r=> ({...r, time: new Date(r.ts).toLocaleString()}));
+}
+
+/* Simple predictor: linear regression on last N points for each key, returns next timestamp predictions */
+function predictNextSeries(data, steps=1) {
+  // data: array of records sorted ascending by ts with keys
+  const preds = [];
+  const lastTs = data.length ? new Date(data[data.length-1].ts) : new Date();
+  const intervalMs = data.length > 1 ? (data[data.length-1].ts - data[data.length-2].ts) : 15*60*1000;
+  for (let s=1;s<=steps;s++) {
+    const predTs = lastTs.getTime() + s*intervalMs;
+    const rec = { ts: predTs, time: new Date(predTs).toLocaleString() };
+    for (const key of KEYS) {
+      // collect last up to 6 values for simple linear regression
+      const y = [];
+      const x = [];
+      let kCount=0;
+      for (let i=Math.max(0, data.length-6); i<data.length; i++) {
+        if (data[i][key] === undefined) continue;
+        x.push(kCount+1); y.push(data[i][key]); kCount++;
+      }
+      if (y.length < 2) {
+        rec[key] = (data.length && data[data.length-1][key] !== undefined) ? data[data.length-1][key] : 0;
+      } else {
+        // compute slope, intercept
+        const n = x.length;
+        const sumX = x.reduce((a,b)=>a+b,0);
+        const sumY = y.reduce((a,b)=>a+b,0);
+        const sumXY = x.reduce((a,b,i)=>a + b*y[i],0);
+        const sumX2 = x.reduce((a,b)=>a + b*b,0);
+        const denom = n*sumX2 - sumX*sumX;
+        const slope = denom === 0 ? 0 : (n*sumXY - sumX*sumY)/denom;
+        const intercept = (sumY - slope*sumX)/n;
+        const nextX = x.length + 1;
+        rec[key] = intercept + slope*nextX;
+      }
+    }
+    preds.push(rec);
+    // for multi-step, append predicted to data to allow autoregressive continuation
+    data.push({...rec});
+  }
+  return preds;
+}
+
+/* Render everything on page */
+function renderAll(normData, preds) {
+  // latest
+  latestEl.innerHTML = '';
+  const last = normData.length ? normData[normData.length-1] : null;
+  for (const key of KEYS) {
+    const v = last && last[key] !== undefined ? last[key].toFixed(3) : '—';
+    const div = document.createElement('div');
+    div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
+    latestEl.appendChild(div);
+  }
+  // recommendations (simple thresholds)
+  const rc = [];
+  const t = last ? last.temperature : null;
+  if (t !== null && t !== undefined) {
+    if (t > 35) rc.push("High temperature: consider irrigation and shading.");
+    else if (t < 18) rc.push("Low temperature: monitor seedling heat protection.");
+  }
+  const rain = last ? last.rainrate : null;
+  if (rain !== null && rain !== undefined) {
+    if (rain > 10) rc.push("Heavy rain: protect crops from water logging.");
+  }
+  const hum = last ? last.humidity : null;
+  if (hum !== null && hum !== undefined) {
+    if (hum > 80) rc.push("High humidity: risk of fungal disease. Check leaves.");
+  }
+  recommendEl.innerHTML = rc.length ? rc.map(x=>`• ${x}`).join("<br>") : "No specific recommendations.";
+  // update charts
+  const labels = normData.map(r=> r.time);
+  function setChart(ch, key) {
+    ch.data.labels = labels;
+    ch.data.datasets[0].data = normData.map(r=> r[key]===undefined ? null : r[key]);
+    ch.data.datasets[1].data = preds ? preds.map(p=> p[key]) : [];
+    ch.update();
+  }
+  setChart(chartTemp, 'temperature');
+  setChart(chartRain, 'rainrate');
+  setChart(chartHum, 'humidity');
+  setChart(chartSoil, 'soil_moisture');
+}
+
+/* CSV download */
+function generateCSV(data, preds) {
+  // produce combined CSV with time, actual_x, predicted_x ...
+  const rows = [];
+  const headers = ["time"];
+  for (const k of KEYS) {
+    headers.push(`${k}_actual`);
+    headers.push(`${k}_predicted`);
+  }
+  rows.push(headers.join(','));
+  // create a map of predictions by ts for quick lookup
+  const predMap = new Map((preds||[]).map(p=>[p.ts, p]));
+  // assemble union of times (actual times + predicted)
+  const allTimes = new Set([...(data||[]).map(d=>d.ts), ...(preds||[]).map(p=>p.ts)]);
+  const timesSorted = Array.from(allTimes).sort((a,b)=>a-b);
+  for (const t of timesSorted) {
+    const recAct = (data||[]).find(r=>r.ts===t) || {};
+    const recPred = predMap.get(t) || {};
+    const timeStr = new Date(t).toLocaleString();
+    const cells = [timeStr];
+    for (const k of KEYS) {
+      cells.push(recAct[k] !== undefined ? recAct[k] : '');
+      cells.push(recPred[k] !== undefined ? recPred[k] : '');
+    }
+    rows.push(cells.join(','));
+  }
+  return rows.join('\n');
+}
+
+/* top-level */
+async function refreshAll() {
+  const limit = Number(sampleSelect.value);
+  const raw = await fetchTelemetry(limit);
+  if (!raw) return;
+  const norm = normalizeData(raw);
+  // copy norm for predictor
+  const copyForPred = norm.map(x=> ({...x}));
+  const preds = predictNextSeries(copyForPred, 96); // predict next 96 steps (e.g., 24h if 15-min)
+  renderAll(norm, preds);
+  // store for CSV download
+  window._lastFetched = {norm, preds};
+}
+
+/* CSV button */
+btnCSV.addEventListener('click', ()=>{
+  const s = window._lastFetched;
+  if (!s) return alert('No data fetched');
+  const csv = generateCSV(s.norm, s.preds);
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'krishibandhu_data.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+/* Refresh */
+btnRefresh.addEventListener('click', async ()=> {
+  await refreshAll();
+});
+
+/* status helper */
+function setStatus(txt) { statusEl.textContent = txt; }
+
+/* language handling */
+let currentLangCode = 'en';
+function currentLang() { return () => currentLangCode; }
+function applyLang(code) {
+  currentLangCode = code;
+  titleEl.textContent = STR[code].title;
+  samplesLabel.textContent = STR[code].samplesLabel;
+  setStatus(STR[code].statusIdle);
+  recommendTitle.textContent = STR[code].recommendTitle;
+  noteEl.textContent = STR[code].note;
+  imgTitle.textContent = STR[code].imgTitle;
+  imgDesc.textContent = STR[code].imgDesc;
+}
+langSelect.addEventListener('change', (e)=> applyLang(e.target.value));
+applyLang('en');
+
+/* image upload & preview */
+imgInput.addEventListener('change', (ev)=>{
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  preview.src = url;
+  preview.dataset.file = '';
+  preview.dataset.blob = f;
+});
+
+/* camera capture fallback */
+btnCam.addEventListener('click', async ()=>{
+  // create a camera capture input
+  const capture = document.createElement('input');
+  capture.type = 'file';
+  capture.accept = 'image/*';
+  capture.capture = 'environment';
+  capture.onchange = (e)=> {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    preview.src = URL.createObjectURL(f);
+    preview.dataset.blob = f;
+  };
+  capture.click();
+});
+
+/* Load TF.js model & predict */
+let loadedModel = null;
+btnPredictModel.addEventListener('click', async ()=>{
+  if (!preview.src) { alert('Upload or capture an image first'); return; }
+  setStatus(STR[langSelect.value].predictionLoading);
+  if (!loadedModel) {
+    try {
+      loadedModel = await tf.loadLayersModel('/model/model.json'); // must exist in repo
+    } catch (e) {
+      console.error(e);
+      alert('Model load failed. Put model files at /model/model.json and weights shards.');
+      setStatus('Model load failed');
+      return;
+    }
+  }
+  // preprocess image into tensor
+  const imgEl = document.createElement('img');
+  imgEl.src = preview.src;
+  await imgEl.decode();
+  // resize/crop: depends on model input size; here we assume 224x224
+  const tensor = tf.browser.fromPixels(imgEl).resizeNearestNeighbor([224,224]).toFloat().div(255.0).expandDims(0);
+  const out = loadedModel.predict(tensor);
+  const probs = Array.from(out.dataSync());
+  // For simplicity, we show top label — you must maintain labels file or hardcode
+  // Example labels:
+  const labels = ["Healthy","Blast","Bacterial Blight","Brown Spot"];
+  const topIdx = probs.indexOf(Math.max(...probs));
+  predictionResult.innerHTML = `Prediction: <b>${labels[topIdx]}</b> (confidence: ${(probs[topIdx]*100).toFixed(1)}%)`;
+  setStatus(STR[langSelect.value].statusIdle);
+});
+
+/* initial note about CORS */
+noteEl.textContent = STR.en.note;
+
+</script>
+</body>
+</html>
