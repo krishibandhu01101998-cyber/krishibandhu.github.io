@@ -119,6 +119,14 @@ const CONFIG = {
           + "HRPBcEnBwMR88TevuNnubQRO3tJc6UDmpgl_bHjICj-d0tZMCy2TVJjIPapQ"
 };
 const KEYS = ["temperature", "rainrate", "humidity", "soil_moisture"];
+
+/* Add mapping for ThingsBoard prediction keys (update if your TB uses different names) */
+const PRED_KEYS = {
+  temperature: "temperature_predicted",
+  rainrate:    "rainrate_predicted",
+  humidity:    "humidity_predicted",
+  soil_moisture: "soil_moisture_predicted"
+};
 /* ========== i18n ========== */
 const STR = {
   en: {
@@ -356,56 +364,175 @@ async function computePredictedSeries(normData) {
   return { predictedByKey, combinedLabels, horizon };
 }
 
+/* ---------- REPLACED: refreshAll_andPlot that also loads TB-side predictions when no actuals ---------- */
 async function refreshAll_andPlot() {
   const limit = Number(sampleSelect.value);
   const raw = await fetchTelemetry(limit);
-  if (!raw) return;
-  const norm = normalizeData(raw);
-  setStatus("Computing predictions...");
-  const { predictedByKey, combinedLabels, horizon } = await computePredictedSeries(norm);
 
-  const actualByKey = {};
-  for (const k of KEYS) {
-    const arr = norm.map(r => (r[k] === undefined ? null : Number(r[k])));
-    for (let i=0;i<horizon;i++) arr.push(null);
-    actualByKey[k] = arr;
-  }
+  // If we have actual telemetry data, proceed as before
+  if (raw) {
+    const norm = normalizeData(raw);
+    if (norm && norm.length > 0) {
+      // we have actuals — compute predicted tail and plot
+      setStatus("Computing predictions for actual data...");
+      const { predictedByKey, combinedLabels, horizon } = await computePredictedSeries(norm);
+      // pad actual arrays to match combinedLabels and update charts
+      const actualByKey = {};
+      for (const k of KEYS) {
+        const arr = norm.map(r => (r[k] === undefined ? null : Number(r[k])));
+        for (let i=0;i<horizon;i++) arr.push(null);
+        actualByKey[k] = arr;
+      }
+      // update latest panel with last actual
+      latestEl.innerHTML = '';
+      const last = norm.length ? norm[norm.length-1] : null;
+      for (const key of KEYS) {
+        const v = last && last[key] !== undefined ? last[key].toFixed(3) : '—';
+        const div = document.createElement('div');
+        div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
+        latestEl.appendChild(div);
+      }
+      // update charts
+      function updateChart(ch, key) {
+        ch.data.labels = combinedLabels;
+        ch.data.datasets[0].data = actualByKey[key];
+        ch.data.datasets[1].data = predictedByKey[key];
+        ch.update();
+      }
+      updateChart(chartTemp, 'temperature');
+      updateChart(chartRain, 'rainrate');
+      updateChart(chartHum, 'humidity');
+      updateChart(chartSoil, 'soil_moisture');
 
-  latestEl.innerHTML = '';
-  const last = norm.length ? norm[norm.length-1] : null;
-  for (const key of KEYS) {
-    const v = last && last[key] !== undefined ? last[key].toFixed(3) : '—';
-    const div = document.createElement('div');
-    div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
-    latestEl.appendChild(div);
-  }
-
-  function updateChart(ch, key) {
-    ch.data.labels = combinedLabels;
-    ch.data.datasets[0].data = actualByKey[key];
-    ch.data.datasets[1].data = predictedByKey[key];
-    ch.update();
-  }
-  updateChart(chartTemp, 'temperature');
-  updateChart(chartRain, 'rainrate');
-  updateChart(chartHum, 'humidity');
-  updateChart(chartSoil, 'soil_moisture');
-
-  const rc = [];
-  if (last) {
-    const t = last.temperature;
-    if (t !== undefined && t !== null) {
-      if (t > 35) rc.push("High temperature: consider irrigation and shading.");
-      else if (t < 18) rc.push("Low temperature: monitor seedling heat protection.");
+      // recommendations (same as before)
+      const rc = [];
+      if (last) {
+        const t = last.temperature; if (t !== undefined && t !== null) { if (t > 35) rc.push("High temperature: consider irrigation and shading."); else if (t < 18) rc.push("Low temperature: monitor seedling heat protection."); }
+        if (last.humidity !== undefined && last.humidity > 80) rc.push("High humidity: risk of fungal disease. Check leaves.");
+        if (last.rainrate !== undefined && last.rainrate > 10) rc.push("Heavy rain: protect crops from water logging.");
+      }
+      recommendEl.innerHTML = rc.length ? rc.map(x=>`• ${x}`).join("<br>") : "No specific recommendations.";
+      window._lastFetched = { norm, predictedByKey, combinedLabels };
+      setStatus("Updated actual vs predicted (last run).");
+      return;
     }
-    if (last.humidity !== undefined && last.humidity > 80) rc.push("High humidity: risk of fungal disease. Check leaves.");
-    if (last.rainrate !== undefined && last.rainrate > 10) rc.push("Heavy rain: protect crops from water logging.");
   }
-  recommendEl.innerHTML = rc.length ? rc.map(x=>`• ${x}`).join("<br>") : "No specific recommendations.";
 
-  window._lastFetched = { norm, predictedByKey, combinedLabels };
+  // --- No actual telemetry available: try to fetch predicted telemetry keys from ThingsBoard ---
+  setStatus("No recent actual telemetry — attempting to load predictions from ThingsBoard...");
+  try {
+    // construct keys string from PRED_KEYS values
+    const predKeysList = Object.values(PRED_KEYS).map(k => encodeURIComponent(k)).join(',');
+    const url = `${CONFIG.TB_HOST}/api/plugins/telemetry/DEVICE/${CONFIG.TB_DEVICE_ID}/values/timeseries?keys=${predKeysList}&limit=${limit}`;
+    const res = await fetch(url, { headers: { "Authorization": CONFIG.TB_JWT }});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const predRaw = await res.json();
+    // normalize predicted telemetry (same shape expected: arrays of {ts,value})
+    // build records from predRaw
+    const map = new Map();
+    // map predicted keys back to KEYS: find which TB key maps to which metric
+    for (const k of KEYS) {
+      const tbKey = PRED_KEYS[k];
+      const arr = predRaw[tbKey] || [];
+      for (const item of arr) {
+        const t = item.ts;
+        if (!map.has(t)) map.set(t, { ts: t });
+        map.get(t)[k] = Number(item.value);
+      }
+    }
+    const predArr = Array.from(map.values()).sort((a,b)=>a.ts-b.ts).map(r=> ({...r, time: new Date(r.ts).toLocaleString()}));
 
-  setStatus("Updated actual vs predicted (last run).");
+    if (predArr.length > 0) {
+      // we have TB-side predictions — plot them (no actuals)
+      const labels = predArr.map(r=>r.time);
+      const predictedByKey = {};
+      const actualByKey = {};
+      for (const k of KEYS) {
+        predictedByKey[k] = predArr.map(r => r[k] === undefined ? null : Number(r[k]));
+        // actual series will be nulls since none present
+        actualByKey[k] = new Array(predictedByKey[k].length).fill(null);
+      }
+      // update latest panel showing most recent predicted values
+      latestEl.innerHTML = '';
+      const lastPred = predArr.length ? predArr[predArr.length-1] : null;
+      for (const key of KEYS) {
+        const v = lastPred && lastPred[key] !== undefined ? lastPred[key].toFixed(3) : '—';
+        const div = document.createElement('div');
+        div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
+        latestEl.appendChild(div);
+      }
+      // update charts (actual dataset will be null series)
+      function updateChart(ch, key) {
+        ch.data.labels = labels;
+        ch.data.datasets[0].data = actualByKey[key];
+        ch.data.datasets[1].data = predictedByKey[key];
+        ch.update();
+      }
+      updateChart(chartTemp, 'temperature');
+      updateChart(chartRain, 'rainrate');
+      updateChart(chartHum, 'humidity');
+      updateChart(chartSoil, 'soil_moisture');
+
+      recommendEl.innerHTML = "Predicted values shown (no actual telemetry).";
+      window._lastFetched = { norm: [], predictedByKey, combinedLabels: labels };
+      setStatus("Showing predictions from ThingsBoard.");
+      return;
+    }
+  } catch (e) {
+    console.warn("Failed to load predicted telemetry from ThingsBoard:", e);
+  }
+
+  // --- If we reach here: ThingsBoard had no predictions (or request failed) ---
+  // Fallback: use last computed predictions in memory (if available)
+  if (window._lastFetched && window._lastFetched.predictedByKey) {
+    setStatus("No current telemetry. Using last in-memory predictions.");
+    const predictedByKey = window._lastFetched.predictedByKey;
+    const combinedLabels = window._lastFetched.combinedLabels || [];
+    const actualByKey = {};
+    for (const k of KEYS) actualByKey[k] = new Array(combinedLabels.length).fill(null);
+    function updateChart(ch, key) {
+      ch.data.labels = combinedLabels;
+      ch.data.datasets[0].data = actualByKey[key];
+      ch.data.datasets[1].data = predictedByKey[key];
+      ch.update();
+    }
+    updateChart(chartTemp, 'temperature');
+    updateChart(chartRain, 'rainrate');
+    updateChart(chartHum, 'humidity');
+    updateChart(chartSoil, 'soil_moisture');
+
+    // show most recent predicted values in latest panel
+    latestEl.innerHTML = '';
+    const lastPredVal = (() => {
+      const kb = predictedByKey;
+      if (!kb) return null;
+      const anyKey = KEYS[0];
+      const arr = kb[anyKey] || [];
+      const lastIdx = arr.length - 1;
+      if (lastIdx < 0) return null;
+      const rec = {};
+      for (const k of KEYS) rec[k] = (kb[k] && kb[k][lastIdx] !== undefined) ? kb[k][lastIdx] : null;
+      return rec;
+    })();
+    for (const key of KEYS) {
+      const v = lastPredVal && lastPredVal[key] !== null ? lastPredVal[key].toFixed(3) : '—';
+      const div = document.createElement('div');
+      div.innerHTML = `<div class="small">${key}</div><div style="font-weight:600">${v}</div>`;
+      latestEl.appendChild(div);
+    }
+
+    recommendEl.innerHTML = "Showing last in-memory predictions (no telemetry).";
+    setStatus("Displayed cached predictions.");
+    return;
+  }
+
+  // final fallback: nothing to show
+  setStatus("No telemetry or predictions available.");
+  latestEl.innerHTML = '';
+  recommendEl.innerHTML = "No data available.";
+  // clear charts
+  function clearChart(ch) { ch.data.labels = []; ch.data.datasets[0].data = []; ch.data.datasets[1].data = []; ch.update(); }
+  clearChart(chartTemp); clearChart(chartRain); clearChart(chartHum); clearChart(chartSoil);
 }
 
 let pollHandle = null;
